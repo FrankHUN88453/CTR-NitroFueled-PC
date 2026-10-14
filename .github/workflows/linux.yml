@@ -1,0 +1,61 @@
+# Linux build of the runner and its AppImage (DXVK native for D3D11, SDL2, vkd3d-shader's HLSL
+# compiler for the first-start shader setup). Nothing of the game is built or packed here.
+name: Linux AppImage
+
+on:
+  push:
+    branches: [main, linux]
+  workflow_dispatch:
+
+jobs:
+  appimage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld cmake ninja-build pkg-config libsdl2-dev patchelf file \
+            bison flex spirv-headers libvulkan-dev libjson-perl python3
+
+      - name: DXVK native
+        run: |
+          curl -fsSL -o dxvk.tar.gz \
+            https://github.com/doitsujin/dxvk/releases/download/v3.1.1/dxvk-native-3.1.1-steamrt-sniper.tar.gz
+          mkdir dxvk && tar -xzf dxvk.tar.gz -C dxvk
+          find dxvk -maxdepth 5 -type d | head -40
+          echo "DXVK_WIN=$PWD/$(dirname "$(find dxvk -name windows_base.h | head -1)")" >> "$GITHUB_ENV"
+          echo "DXVK_DX=$PWD/$(dirname "$(find dxvk -name d3d11.h | head -1)")" >> "$GITHUB_ENV"
+          echo "DXVK_LIB=$PWD/$(dirname "$(find dxvk -name 'libdxvk_d3d11.so*' | head -1)")" >> "$GITHUB_ENV"
+
+      - name: vkd3d (HLSL compiler)
+        run: |
+          curl -fsSL -o vkd3d.tar.xz https://dl.winehq.org/vkd3d/source/vkd3d-2.1.tar.xz
+          tar -xf vkd3d.tar.xz
+          cd vkd3d-2.1
+          ./configure --prefix="$GITHUB_WORKSPACE/vkd3d-out" --disable-static
+          make -j"$(nproc)"
+          make install
+          "$GITHUB_WORKSPACE/vkd3d-out/bin/vkd3d-compiler" --help || true
+          # the options the setup uses (tools/gcn2hlsl.py), on the runner's own built-in shaders
+          for e in vsmain:vs_5_0 psmain:ps_5_0 copyps:ps_5_0; do
+            "$GITHUB_WORKSPACE/vkd3d-out/bin/vkd3d-compiler" -x hlsl -b dxbc-tpf -p "${e#*:}" -e "${e%%:*}" \
+              -o "/tmp/${e%%:*}.dxbc" "$GITHUB_WORKSPACE/port/src/gfx/builtin.hlsl"
+            ls -la "/tmp/${e%%:*}.dxbc"
+          done
+
+      - name: Build
+        run: |
+          cmake -S port -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -DCTR_EMBED_DATA=OFF \
+            -DDXVK_INCLUDE_WINDOWS="$DXVK_WIN" -DDXVK_INCLUDE_DIRECTX="$DXVK_DX" -DDXVK_LIB_DIR="$DXVK_LIB"
+          cmake --build build -- -k 0
+
+      - name: AppImage
+        run: sh port/tools/make_appimage.sh build/CrashTeamRacingNitroFueled "$DXVK_LIB" vkd3d-out out "${GITHUB_REF_NAME}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CTR-NitroFueled-PC-linux
+          path: out/*.AppImage

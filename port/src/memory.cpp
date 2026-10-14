@@ -1,6 +1,9 @@
 #include "memory.h"
 
 #include <windows.h>
+#ifndef _WIN32
+#include "platform/linux/shim_linux.h"
+#endif
 
 #include <algorithm>
 #include <cstring>
@@ -75,6 +78,7 @@ bool GuestWrittenSince(u64 addr, u64 size, bool reset) {
 
 void GuestResetWritten(u64 addr, u64 size) { ResetWriteWatch((void*)addr, size); }
 
+#ifdef _WIN32
 extern thread_local bool g_fault_probe;  // crash.cpp
 
 namespace {
@@ -99,6 +103,9 @@ bool GuestTryCopy(void* dst, const void* src, size_t n) {
     g_fault_probe = false;
     return ok;
 }
+#else
+bool GuestTryCopy(void* dst, const void* src, size_t n) { return ShimTryCopy(dst, src, n); }
+#endif
 
 void GuestWrittenRuns(void (*fn)(u64 begin, u64 end, void* user), void* user) {
     std::vector<std::pair<u64, u64>> ranges;

@@ -45,6 +45,9 @@ def steam_libraries():
     for env in ("ProgramFiles(x86)", "ProgramFiles"):
         if os.environ.get(env):
             roots.append(os.path.join(os.environ[env], "Steam"))
+    home = os.path.expanduser("~")
+    roots += [os.path.join(home, ".local", "share", "Steam"), os.path.join(home, ".steam", "steam"),
+              os.path.join(home, ".var", "app", "com.valvesoftware.Steam", ".local", "share", "Steam")]
     libs = []
     for root in roots:
         vdf = os.path.join(root, "steamapps", "libraryfolders.vdf")

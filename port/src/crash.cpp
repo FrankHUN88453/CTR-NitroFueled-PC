@@ -1,4 +1,5 @@
-// Last-chance diagnostics for faults inside guest code.
+// Last-chance diagnostics for faults inside guest code (Linux: platform/linux/crash_linux.cpp).
+#ifdef _WIN32
 #include <windows.h>
 
 #include "common.h"
@@ -53,3 +54,4 @@ static LONG CALLBACK CrashHandler(EXCEPTION_POINTERS* ep) {
 void InstallCrashHandler() {
     AddVectoredExceptionHandler(0, CrashHandler);
 }
+#endif  // _WIN32

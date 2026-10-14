@@ -3,6 +3,8 @@
 // (default: the directory of the exe, then the current directory).
 #include <windows.h>
 
+#include <clocale>
+#include <cstdlib>
 #include <filesystem>
 
 #include "common.h"
@@ -71,6 +73,10 @@ DWORD WINAPI MainThread(LPVOID) {
 
 int main(int argc, char** argv) {
     namespace fs = std::filesystem;
+#ifndef _WIN32
+    setlocale(LC_ALL, "");                  // UTF-8 file names
+    setenv("DXVK_WSI_DRIVER", "SDL2", 0);  // DXVK native: HWND = SDL_Window*
+#endif
     wchar_t exe_buf[MAX_PATH];
     GetModuleFileNameW(nullptr, exe_buf, MAX_PATH);
     const fs::path exe_path(exe_buf);
@@ -91,7 +97,19 @@ int main(int argc, char** argv) {
     fs::path game = argc > 1                                     ? fs::path(argv[1])
                     : fs::exists(exe_path.parent_path() / "eboot.bin") ? exe_path.parent_path()
                                                                  : fs::current_path();
+#ifndef _WIN32
+    // an AppImage runs from a mount: the game is next to the .AppImage file
+    if (const char* appimage = getenv("APPIMAGE"); argc <= 1 && appimage &&
+                                                   fs::exists(fs::path(appimage).parent_path() / "eboot.bin"))
+        game = fs::path(appimage).parent_path();
+#endif
     if (!fs::exists(game / "eboot.bin")) {
+#ifndef _WIN32
+        MessageBoxA(nullptr,
+                    "eboot.bin was not found.\n\nPut the AppImage into your game folder (next to eboot.bin), or "
+                    "start it with the folder as its argument.",
+                    "Crash Team Racing Nitro-Fueled", MB_OK | MB_ICONERROR);
+#endif
         Fatal("eboot.bin not found in %s (usage: %s <game dump dir>)", game.string().c_str(),
               exe_path.filename().string().c_str());
     }

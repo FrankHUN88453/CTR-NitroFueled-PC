@@ -1,7 +1,11 @@
 #include "linker.h"
 
 #include <windows.h>
+#ifdef _WIN32
 #include <dbghelp.h>
+#else
+#include <dlfcn.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -167,6 +171,21 @@ Module* Linker::FindByAddr(u64 addr) {
 
 std::string Linker::Describe(u64 addr) {
     char buf[512];
+#ifndef _WIN32
+    if (!FindByAddr(addr)) {  // host code: the executable or a shared library
+        Dl_info info{};
+        if (dladdr((void*)addr, &info) && info.dli_fname) {
+            const char* slash = strrchr(info.dli_fname, '/');
+            const char* base = slash ? slash + 1 : info.dli_fname;
+            if (info.dli_sname)
+                snprintf(buf, sizeof(buf), "%s!%s+0x%llx", base, info.dli_sname,
+                         (unsigned long long)(addr - (u64)info.dli_saddr));
+            else
+                snprintf(buf, sizeof(buf), "%s+0x%llx", base, (unsigned long long)(addr - (u64)info.dli_fbase));
+            return buf;
+        }
+    }
+#else
     HMODULE self = GetModuleHandleA(nullptr);
     HMODULE owner = nullptr;
     if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -192,6 +211,7 @@ std::string Linker::Describe(u64 addr) {
         (void)self;
         return buf;
     }
+#endif
     if (Module* m = FindByAddr(addr)) {
         u64 off = addr - (u64)m->base;
         auto it = std::upper_bound(m->func_names.begin(), m->func_names.end(), off,

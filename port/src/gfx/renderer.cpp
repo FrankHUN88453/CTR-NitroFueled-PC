@@ -1,7 +1,9 @@
 // D3D11 renderer driven by the engine's own render state (see gfx.h).
 #include <windows.h>
 #include <d3d11_1.h>
+#ifdef _WIN32
 #include <d3dcompiler.h>
+#endif
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -172,6 +174,7 @@ struct DrawTimer {
 };
 
 void DrainDebugMessages(int max = 16) {
+#ifdef _WIN32
     ComPtr<ID3D11InfoQueue> q;
     if (!g_dev || FAILED(g_dev.As(&q))) return;
     UINT64 n = q->GetNumStoredMessages();
@@ -186,6 +189,9 @@ void DrainDebugMessages(int max = 16) {
         }
     }
     q->ClearStoredMessages();
+#else
+    (void)max;
+#endif
 }
 
 bool Readable(u64 a, u64 n) {
@@ -299,34 +305,7 @@ void LoadShaderIndex() {
     LOG("gfx: %zu translated shaders indexed from %s", g_shaders.size(), g_shader_dir.string().c_str());
 }
 
-const char* kBlitHlsl = R"(
-Texture2D t0 : register(t0);
-SamplerState s0 : register(s0);
-void vsmain(uint id : SV_VertexID, out float4 pos : SV_Position, out float2 uv : TEXCOORD0) {
-    uv = float2((id << 1) & 2, id & 2);
-    pos = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
-}
-// Downsampling resolve of the supersampled frame: 4x4 bilinear taps spread over the source
-// footprint of the output pixel, averaged in linear light (box filter, any scale ratio).
-float4 psmain(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-    float2 fp = float2(ddx(uv).x, ddy(uv).y);
-    uint w, h;
-    t0.GetDimensions(w, h);
-    float2 ratio = abs(fp) * float2(w, h);
-    if (max(ratio.x, ratio.y) <= 1.01) return float4(t0.Sample(s0, uv).rgb, 1);
-    float3 c = 0;
-    [unroll] for (int y = 0; y < 4; y++)
-        [unroll] for (int x = 0; x < 4; x++)
-            c += pow(abs(t0.SampleLevel(s0, uv + fp * ((float2(x, y) + 0.5) / 4 - 0.5), 0).rgb), 2.2);
-    return float4(pow(c / 16, 1 / 2.2), 1);
-}
-// Texel copy between surfaces that CopySubresourceRegion cannot copy (depth into a color
-// surface, different supersampling): source texel = target pixel * ratio + offset.
-cbuffer copy : register(b0) { float2 copy_ratio; float2 copy_offset; };
-float4 copyps(float4 pos : SV_Position) : SV_Target {
-    return t0.Load(int3(floor(pos.xy) * copy_ratio + copy_offset, 0));
-}
-)";
+#include "builtin_shaders.inc"  // builtin.hlsl, compiled by tools/compile_builtin_shaders.py
 
 bool Init() {
     if (g_dev) return true;
@@ -359,6 +338,7 @@ bool Init() {
         g_init_failed = true;
         return false;
     }
+#ifdef _WIN32
     if (flags) {
         ComPtr<ID3D11InfoQueue> q;
         if (SUCCEEDED(g_dev.As(&q))) {
@@ -368,6 +348,7 @@ bool Init() {
             LOG("gfx: D3D11 debug layer enabled");
         }
     }
+#endif
     ComPtr<ID3D11Texture2D> bb;
     g_swap->GetBuffer(0, IID_PPV_ARGS(&bb));
     g_dev->CreateRenderTargetView(bb.Get(), nullptr, &g_swap_rtv);
@@ -426,14 +407,10 @@ bool Init() {
     av.Texture2DArray.ArraySize = 1;
     g_dev->CreateShaderResourceView(g_placeholder.tex.Get(), &av, &g_placeholder.srv_array);
 
-    ComPtr<ID3DBlob> vsb, psb, cpb, err;
-    D3DCompile(kBlitHlsl, strlen(kBlitHlsl), "blit", nullptr, nullptr, "vsmain", "vs_5_0", 0, 0, &vsb, &err);
-    D3DCompile(kBlitHlsl, strlen(kBlitHlsl), "blit", nullptr, nullptr, "psmain", "ps_5_0", 0, 0, &psb, &err);
-    D3DCompile(kBlitHlsl, strlen(kBlitHlsl), "blit", nullptr, nullptr, "copyps", "ps_5_0", 0, 0, &cpb, &err);
-    if (vsb && psb && cpb) {
-        g_dev->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &g_blit_vs);
-        g_dev->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &g_blit_ps);
-        g_dev->CreatePixelShader(cpb->GetBufferPointer(), cpb->GetBufferSize(), nullptr, &g_copy_ps);
+    {
+        g_dev->CreateVertexShader(kBuiltinBlitVs, sizeof(kBuiltinBlitVs), nullptr, &g_blit_vs);
+        g_dev->CreatePixelShader(kBuiltinBlitPs, sizeof(kBuiltinBlitPs), nullptr, &g_blit_ps);
+        g_dev->CreatePixelShader(kBuiltinCopyPs, sizeof(kBuiltinCopyPs), nullptr, &g_copy_ps);
         D3D11_BUFFER_DESC bd{};
         bd.ByteWidth = 16;
         bd.Usage = D3D11_USAGE_DYNAMIC;
@@ -485,6 +462,7 @@ ShaderInfo* GetShader(u64 handle, bool vertex) {
     if (info && !info->loaded) {
         info->loaded = true;
         info->video = info->name == "Rt_6d0ae01fb1b6a3de_ps" || info->name == "Rt_06414427fa62da56_ps";
+#ifdef _WIN32
         // debugging aid: override/<name>.hlsl replaces the translated shader
         fs::path ov = fs::path("override") / (info->name + ".hlsl");
         if (fs::exists(ov)) {
@@ -500,6 +478,7 @@ ShaderInfo* GetShader(u64 handle, bool vertex) {
                 LOG("gfx: override %s failed: %s", ov.string().c_str(), err ? (char*)err->GetBufferPointer() : "?");
             }
         }
+#endif
         if (info->bytecode.empty()) {
             auto e = g_embedded.find(info->name);
             if (e != g_embedded.end()) {

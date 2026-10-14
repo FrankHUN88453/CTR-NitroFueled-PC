@@ -1,7 +1,9 @@
 #include "glyphs.h"
 
 #include <windows.h>
+#ifdef _WIN32
 #include <objidl.h>
+#endif
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -10,11 +12,13 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
 namespace Gdiplus {
 using std::max;
 using std::min;
 }  // namespace Gdiplus
 #include <gdiplus.h>
+#endif
 
 #include <filesystem>
 #include <fstream>
@@ -101,6 +105,7 @@ ComPtr<ID3D11ShaderResourceView> MakeView(ID3D11Device* dev, DXGI_FORMAT fmt, co
     return srv;
 }
 
+#ifdef _WIN32
 // ------------------------------------------------------------------ keyboard / mouse glyphs
 namespace gp = Gdiplus;
 
@@ -248,6 +253,11 @@ std::vector<u8> DrawKeyboardAtlas(bool menu) {
     gp::GdiplusShutdown(token);
     return atlas;
 }
+
+#else
+// Linux: no GDI+ yet: without these atlases the keyboard shows the game's own button glyphs
+std::vector<u8> DrawKeyboardAtlas(bool) { return {}; }
+#endif
 
 std::vector<u8> DrawMenuAtlas() { return DrawKeyboardAtlas(true); }
 std::vector<u8> DrawDrivingAtlas() { return DrawKeyboardAtlas(false); }

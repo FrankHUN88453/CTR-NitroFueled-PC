@@ -1405,8 +1405,28 @@ float quad_swizzle(float v, uint perm, uint lane) {
 _d3dc = None
 
 
+def vkd3d_compile(src, target):
+    """HLSL -> DXBC with vkd3d-shader's compiler (Linux has no d3dcompiler): CTR_VKD3D_COMPILER or
+    vkd3d-compiler on the PATH."""
+    import subprocess
+    import tempfile
+    exe = os.environ.get("CTR_VKD3D_COMPILER", "vkd3d-compiler")
+    with tempfile.TemporaryDirectory(prefix="ctr_hlsl_") as d:
+        src_path, out_path = os.path.join(d, "s.hlsl"), os.path.join(d, "s.dxbc")
+        with open(src_path, "w") as f:
+            f.write(src)
+        r = subprocess.run([exe, "-x", "hlsl", "-b", "dxbc-tpf", "-p", target, "-e", "main", "-o", out_path,
+                            src_path], capture_output=True, text=True)
+        if r.returncode != 0 or not os.path.exists(out_path):
+            return 0x80004005, b"", (r.stderr or r.stdout or f"exit code {r.returncode}").strip()
+        with open(out_path, "rb") as f:
+            return 0, f.read(), r.stderr
+
+
 def d3d_compile(src, target):
     global _d3dc
+    if os.name != "nt" or os.environ.get("CTR_VKD3D_COMPILER") or os.environ.get("CTR_HLSL_COMPILER") == "vkd3d":
+        return vkd3d_compile(src, target)
     if _d3dc is None:
         _d3dc = ctypes.WinDLL("d3dcompiler_47.dll")
         _d3dc.D3DCompile.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_void_p,

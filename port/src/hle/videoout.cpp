@@ -19,7 +19,9 @@
 namespace {
 
 constexpr int kHandle = 1;
+#ifdef _WIN32
 HWND g_hwnd;
+#endif
 std::atomic<u64> g_flips{0}, g_vblanks{0};
 std::atomic<s64> g_flip_arg{0};
 std::atomic<int> g_current_buffer{-1};
@@ -28,6 +30,7 @@ std::vector<std::pair<Equeue*, void*>> g_vblank_queues, g_flip_queues;
 u64 g_start_tick = GetTickCount64();
 u64 g_buffers[16];
 
+#ifdef _WIN32
 // Borderless fullscreen on the window's monitor (F11 / Alt+Enter, setting Fullscreen=1)
 void SetFullscreen(HWND h, bool on) {
     static RECT windowed{};
@@ -167,6 +170,12 @@ void WindowThread() {
         DispatchMessageA(&m);
     }
 }
+#else
+}  // namespace
+void VideoOutSdlWindowThread();  // platform/linux/videoout_sdl.cpp
+namespace {
+void WindowThread() { VideoOutSdlWindowThread(); }
+#endif
 
 void VblankThread() {
     HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
@@ -308,6 +317,7 @@ HLE("libSceVideoOut", sceVideoOutSetBufferAttribute);
 
 }  // namespace
 
+#ifdef _WIN32
 int VideoOutTakeWheel() {
     int v = g_wheel.exchange(0);
     return v / WHEEL_DELTA;
@@ -342,6 +352,7 @@ void VideoOutSetFullscreen(bool on) {
 HWND__* VideoOutHwndRaw() {
     return g_hwnd;
 }
+#endif
 
 // Frame limiter (settings FpsLimit / VSync). The game asks for a 30 Hz flip rate, but its clock
 // (CClock) runs on measured frame times, so any rate works.

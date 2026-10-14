@@ -3,6 +3,12 @@
 // /savedata<N> -> the mounted save data folder (savedata.cpp), /download0, /temp0, /data ->
 // %APPDATA%\CTRNF\<name>
 #include <windows.h>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <cerrno>
+#endif
 
 #include <cstring>
 #include <filesystem>
@@ -24,8 +30,16 @@ namespace {
 constexpr int O_ACCMODE_ = 3, O_WRONLY_ = 1, O_RDWR_ = 2, O_APPEND_ = 0x8, O_CREAT_ = 0x200,
               O_TRUNC_ = 0x400, O_EXCL_ = 0x800, O_DIRECTORY_ = 0x20000;
 
+#ifdef _WIN32
+using HostFile = HANDLE;
+const HostFile kNoFile = INVALID_HANDLE_VALUE;
+#else
+using HostFile = int;
+constexpr HostFile kNoFile = -1;
+#endif
+
 struct OpenFile {
-    HANDLE h = INVALID_HANDLE_VALUE;
+    HostFile h = kNoFile;
     fs::path host;
     std::string guest;
     bool dir = false;
@@ -39,6 +53,39 @@ int g_next_fd = 3;
 
 fs::path UserDataDir() { return UserRoot(); }
 
+// The dump's file names as the game asks for them: Linux file systems are case-sensitive while the
+// game was only ever tested against case-insensitive ones, so a name that does not exist is looked
+// up again ignoring case (directory listings cached).
+fs::path ResolveCase(const fs::path& p) {
+#ifdef _WIN32
+    return p;
+#else
+    std::error_code ec;
+    if (fs::exists(p, ec)) return p;
+    static std::mutex m;
+    static std::unordered_map<std::string, std::vector<std::string>> listings;
+    std::lock_guard lk(m);
+    fs::path cur = fs::path(g_linker.game_dir);
+    fs::path rel = p.lexically_relative(cur);
+    if (rel.empty() || *rel.begin() == "..") return p;
+    for (const fs::path& part : rel) {
+        fs::path next = cur / part;
+        if (!fs::exists(next, ec)) {
+            auto& names = listings[cur.string()];
+            if (names.empty())
+                for (auto& e : fs::directory_iterator(cur, ec)) names.push_back(e.path().filename().string());
+            for (const std::string& n : names)
+                if (strcasecmp(n.c_str(), part.string().c_str()) == 0) {
+                    next = cur / n;
+                    break;
+                }
+        }
+        cur = next;
+    }
+    return cur;
+#endif
+}
+
 fs::path ToHost(const char* guest) {
     std::string g = guest;
     for (auto& c : g) {
@@ -50,7 +97,7 @@ fs::path ToHost(const char* guest) {
     };
     std::string rest;
     if ((rest = strip("/app0")) != "\x01") {
-        return fs::path(g_linker.game_dir) / fs::path(rest).relative_path();
+        return ResolveCase(fs::path(g_linker.game_dir) / fs::path(rest).relative_path());
     }
     fs::path saved;
     if (SaveDataMountedPath(g, &saved)) return saved;
@@ -64,6 +111,22 @@ fs::path ToHost(const char* guest) {
     return fs::path(g_linker.game_dir) / fs::path(g).relative_path();
 }
 
+#ifndef _WIN32
+int PosixErr() {
+    switch (errno) {
+    case ENOENT: return ENOENT_;
+    case EACCES:
+    case EPERM: return EACCES_;
+    case EEXIST: return EEXIST_;
+    case ENOTEMPTY: return ENOTEMPTY_;
+    case ENOTDIR: return ENOTDIR_;
+    case EISDIR: return EISDIR_;
+    default: return EIO_;
+    }
+}
+#endif
+
+#ifdef _WIN32
 int WinErr() {
     switch (GetLastError()) {
     case ERROR_FILE_NOT_FOUND:
@@ -75,6 +138,7 @@ int WinErr() {
     default: return EIO_;
     }
 }
+#endif
 
 OpenFile* Get(int fd) {
     std::lock_guard lk(g_fd_mutex);
@@ -98,6 +162,7 @@ int Open(const char* path, int flags, int /*mode*/) {
             delete f;
             return -ENOTDIR_;
         }
+#ifdef _WIN32
         DWORD access = GENERIC_READ;
         if ((flags & O_ACCMODE_) == O_WRONLY_) access = GENERIC_WRITE;
         if ((flags & O_ACCMODE_) == O_RDWR_) access = GENERIC_READ | GENERIC_WRITE;
@@ -118,6 +183,22 @@ int Open(const char* path, int flags, int /*mode*/) {
         if (flags & O_APPEND_) {
             SetFilePointer(f->h, 0, nullptr, FILE_END);
         }
+#else
+        int pf = (flags & O_ACCMODE_) == O_WRONLY_ ? O_WRONLY : (flags & O_ACCMODE_) == O_RDWR_ ? O_RDWR : O_RDONLY;
+        if (flags & O_CREAT_) {
+            pf |= O_CREAT;
+            fs::create_directories(host.parent_path(), ec);
+        }
+        if (flags & O_TRUNC_) pf |= O_TRUNC;
+        if (flags & O_EXCL_) pf |= O_EXCL;
+        if (flags & O_APPEND_) pf |= O_APPEND;
+        f->h = open(host.c_str(), pf | O_CLOEXEC, 0644);
+        if (f->h < 0) {
+            int e = PosixErr();
+            delete f;
+            return -e;
+        }
+#endif
     }
     std::lock_guard lk(g_fd_mutex);
     int fd = g_next_fd++;
@@ -129,9 +210,19 @@ s64 ReadFd(int fd, void* buf, u64 n) {
     if (fd == 0) return 0;
     OpenFile* f = Get(fd);
     if (!f || f->dir) return -EBADF_;
+#ifdef _WIN32
     DWORD got = 0;
     if (!ReadFile(f->h, buf, (DWORD)n, &got, nullptr)) return -EIO_;
     return got;
+#else
+    // through a bounce buffer: the kernel cannot write into write-watched (protected) guest pages
+    thread_local std::vector<char> bounce;
+    bounce.resize(std::max<size_t>(bounce.size(), n));
+    ssize_t got = read(f->h, bounce.data(), n);
+    if (got < 0) return -EIO_;
+    memcpy(buf, bounce.data(), (size_t)got);
+    return got;
+#endif
 }
 
 s64 WriteFd(int fd, const void* buf, u64 n) {
@@ -143,24 +234,35 @@ s64 WriteFd(int fd, const void* buf, u64 n) {
     }
     OpenFile* f = Get(fd);
     if (!f || f->dir) return -EBADF_;
+#ifdef _WIN32
     DWORD put = 0;
     if (!WriteFile(f->h, buf, (DWORD)n, &put, nullptr)) return -EIO_;
     return put;
+#else
+    ssize_t put = write(f->h, buf, n);
+    return put < 0 ? -EIO_ : put;
+#endif
 }
 
 s64 Seek(int fd, s64 off, int whence) {
     OpenFile* f = Get(fd);
     if (!f || f->dir) return -EBADF_;
+#ifdef _WIN32
     LARGE_INTEGER d, out;
     d.QuadPart = off;
     DWORD m = whence == 1 ? FILE_CURRENT : whence == 2 ? FILE_END : FILE_BEGIN;
     if (!SetFilePointerEx(f->h, d, &out, m)) return -EINVAL_;
     return out.QuadPart;
+#else
+    off_t r = lseek(f->h, off, whence == 1 ? SEEK_CUR : whence == 2 ? SEEK_END : SEEK_SET);
+    return r < 0 ? -EINVAL_ : r;
+#endif
 }
 
 s64 PRW(int fd, void* buf, u64 n, s64 off, bool write) {
     OpenFile* f = Get(fd);
     if (!f || f->dir) return -EBADF_;
+#ifdef _WIN32
     OVERLAPPED ov{};
     ov.Offset = (DWORD)off;
     ov.OffsetHigh = (DWORD)((u64)off >> 32);
@@ -168,6 +270,18 @@ s64 PRW(int fd, void* buf, u64 n, s64 off, bool write) {
     BOOL ok = write ? WriteFile(f->h, buf, (DWORD)n, &done, &ov) : ReadFile(f->h, buf, (DWORD)n, &done, &ov);
     if (!ok && GetLastError() != ERROR_HANDLE_EOF) return -EIO_;
     return done;
+#else
+    if (write) {
+        ssize_t r = pwrite(f->h, buf, n, off);
+        return r < 0 ? -EIO_ : r;
+    }
+    thread_local std::vector<char> bounce;
+    bounce.resize(std::max<size_t>(bounce.size(), n));
+    ssize_t r = pread(f->h, bounce.data(), n, off);
+    if (r < 0) return -EIO_;
+    memcpy(buf, bounce.data(), (size_t)r);
+    return r;
+#endif
 }
 
 int Close(int fd) {
@@ -180,7 +294,11 @@ int Close(int fd) {
         f = it->second;
         g_fds.erase(it);
     }
-    if (f->h != INVALID_HANDLE_VALUE) CloseHandle(f->h);
+#ifdef _WIN32
+    if (f->h != kNoFile) CloseHandle(f->h);
+#else
+    if (f->h != kNoFile) close(f->h);
+#endif
     delete f;
     return 0;
 }
@@ -292,15 +410,23 @@ SYSV int sceKernelRename(const char* a, const char* b) {
     return ec ? SceErr(ENOENT_) : 0;
 }
 SYSV int sceKernelFsync(int fd) {
-    if (OpenFile* f = Get(fd); f && f->h != INVALID_HANDLE_VALUE) FlushFileBuffers(f->h);
+#ifdef _WIN32
+    if (OpenFile* f = Get(fd); f && f->h != kNoFile) FlushFileBuffers(f->h);
+#else
+    if (OpenFile* f = Get(fd); f && f->h != kNoFile) fsync(f->h);
+#endif
     return 0;
 }
 SYSV int sceKernelFtruncate(int fd, s64 len) {
     OpenFile* f = Get(fd);
     if (!f || f->dir) return SceErr(EBADF_);
+#ifdef _WIN32
     FILE_END_OF_FILE_INFO info{};
     info.EndOfFile.QuadPart = len;
     return SetFileInformationByHandle(f->h, FileEndOfFileInfo, &info, sizeof(info)) ? 0 : SceErr(EIO_);
+#else
+    return ftruncate(f->h, len) == 0 ? 0 : SceErr(EIO_);
+#endif
 }
 SYSV int sceKernelGetdents(int fd, char* buf, int n) { return (int)Sce(Getdents(fd, buf, n)); }
 SYSV int sceKernelGetdirentries(int fd, char* buf, int n, s64* base) {

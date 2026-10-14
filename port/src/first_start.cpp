@@ -29,6 +29,7 @@ fs::path ShaderCacheDir() {
     return dir;
 }
 
+#ifdef _WIN32  // Linux: platform/linux/first_start_linux.cpp
 namespace {
 
 constexpr UINT kMsgLine = WM_APP + 1;  // lParam: std::string* (one output line of the setup)
@@ -296,3 +297,4 @@ bool RunFirstStartSetup(const fs::path& game_dir) {
     }
     return true;
 }
+#endif  // _WIN32

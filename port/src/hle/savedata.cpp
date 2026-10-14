@@ -267,8 +267,11 @@ SYSV int sceSaveDataLoadIcon(const MountPoint* mp, Icon* icon) {
     if (dir.empty()) return kErrNotMounted;
     std::ifstream f(dir / "sce_sys" / "icon0.png", std::ios::binary);
     if (!f || !icon || !icon->buf) return kErrNotFound;
-    f.read((char*)icon->buf, (std::streamsize)icon->buf_size);
+    // through a host buffer: on Linux the kernel cannot write into write-watched guest pages
+    std::vector<char> data((size_t)icon->buf_size);
+    f.read(data.data(), (std::streamsize)data.size());
     icon->data_size = (u64)f.gcount();
+    memcpy(icon->buf, data.data(), (size_t)icon->data_size);
     return 0;
 }
 

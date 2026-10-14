@@ -10,9 +10,13 @@
 // Ports seen in CTR: FMOD main mix and BGM (float 8 channels) and Bink (s16 8 channels), all
 // 256 samples at 48 kHz. The FMOD banks (.snd, FSB5) are MPEG: FMOD decodes them in software.
 #include <windows.h>
+#ifdef _WIN32
 #include <audioclient.h>
 #include <mmdeviceapi.h>
 #include <wrl/client.h>
+#else
+#include "../platform/linux/sdl_util.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -28,7 +32,9 @@
 #include "../config.h"
 #include "../hle.h"
 
+#ifdef _WIN32
 using Microsoft::WRL::ComPtr;
+#endif
 
 namespace {
 
@@ -136,13 +142,57 @@ void DumpMix(const float* frames, u32 n) {
     }
 }
 
+// Mixes the queued audio of every port into `out` (n frames, 7.1 float) and wakes the ports.
+void MixInto(float* out, u32 n, float master) {
+    thread_local std::vector<float> mix;
+    mix.assign((size_t)n * kChannels, 0.0f);
+    {
+        std::lock_guard lk(g_mutex);
+        for (Port& p : g_ports) {
+            if (!p.open || p.ring.empty()) continue;
+            u64 avail = p.write - p.read;
+            u32 take = (u32)std::min<u64>(avail, n);
+            if (avail && take < n) p.underrun += n - take;  // ran dry while playing
+            for (u32 i = 0; i < take; i++) {
+                const float* src = &p.ring[((p.read + i) % kRingFrames) * kChannels];
+                float* dst = &mix[(size_t)i * kChannels];
+                for (int c = 0; c < kChannels; c++) {
+                    dst[c] += src[c] * p.volume[c];
+                    p.peak = std::max(p.peak, std::fabs(src[c]));
+                }
+            }
+            p.read += take;
+        }
+    }
+    g_consumed.notify_all();
+    // level meter in the log: every 10 s during the first two minutes
+    static ULONGLONG start = GetTickCount64(), next = start + 10000;
+    if (GetTickCount64() >= next && next < start + 130000) {
+        next += 10000;
+        std::string lv;
+        std::lock_guard lk(g_mutex);
+        for (int h = 1; h < 32; h++)
+            if (g_ports[h].open) {
+                char b[96];
+                snprintf(b, sizeof(b), " port %d (type %d) %.2f, %llu/%llu frames short/dropped", h,
+                         g_ports[h].type, g_ports[h].peak, (unsigned long long)g_ports[h].underrun,
+                         (unsigned long long)g_ports[h].dropped);
+                lv += b;
+                g_ports[h].peak = 0;
+            }
+        LOG("audio: peak levels%s", lv.c_str());
+    }
+    for (size_t i = 0; i < mix.size(); i++) out[i] = std::clamp(mix[i] * master, -1.0f, 1.0f);
+    DumpMix(out, n);
+}
+
 // ------------------------------------------------------------------ WASAPI render thread
+#ifdef _WIN32
 void RenderThread() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     static const GUID kFloat = {0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
     const float master = std::clamp(ConfigInt("Volume", 100), 0, 100) / 100.0f;
     HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    std::vector<float> mix;
     bool logged_failure = false;
     for (;;) {
         ComPtr<IMMDeviceEnumerator> en;
@@ -192,46 +242,7 @@ void RenderThread() {
             if (!n) continue;
             BYTE* data = nullptr;
             if (FAILED(hr = render->GetBuffer(n, &data))) break;
-            mix.assign((size_t)n * kChannels, 0.0f);
-            {
-                std::lock_guard lk(g_mutex);
-                for (Port& p : g_ports) {
-                    if (!p.open || p.ring.empty()) continue;
-                    u64 avail = p.write - p.read;
-                    u32 take = (u32)std::min<u64>(avail, n);
-                    if (avail && take < n) p.underrun += n - take;  // ran dry while playing
-                    for (u32 i = 0; i < take; i++) {
-                        const float* src = &p.ring[((p.read + i) % kRingFrames) * kChannels];
-                        float* dst = &mix[(size_t)i * kChannels];
-                        for (int c = 0; c < kChannels; c++) {
-                            dst[c] += src[c] * p.volume[c];
-                            p.peak = std::max(p.peak, std::fabs(src[c]));
-                        }
-                    }
-                    p.read += take;
-                }
-            }
-            g_consumed.notify_all();
-            // level meter in the log: every 10 s during the first two minutes
-            static ULONGLONG start = GetTickCount64(), next = start + 10000;
-            if (GetTickCount64() >= next && next < start + 130000) {
-                next += 10000;
-                std::string lv;
-                std::lock_guard lk(g_mutex);
-                for (int h = 1; h < 32; h++)
-                    if (g_ports[h].open) {
-                        char b[96];
-                        snprintf(b, sizeof(b), " port %d (type %d) %.2f, %llu/%llu frames short/dropped", h,
-                                 g_ports[h].type, g_ports[h].peak, (unsigned long long)g_ports[h].underrun,
-                                 (unsigned long long)g_ports[h].dropped);
-                        lv += b;
-                        g_ports[h].peak = 0;
-                    }
-                LOG("audio: peak levels%s", lv.c_str());
-            }
-            float* out = (float*)data;
-            for (size_t i = 0; i < mix.size(); i++) out[i] = std::clamp(mix[i] * master, -1.0f, 1.0f);
-            DumpMix(out, n);
+            MixInto((float*)data, n, master);
             render->ReleaseBuffer(n, 0);
         }
         LOG("audio: output device lost (0x%08lx), reopening", hr);
@@ -239,6 +250,38 @@ void RenderThread() {
         g_device_ok = false;
     }
 }
+
+#else
+// ------------------------------------------------------------------ SDL2 audio device (Linux)
+void SdlCallback(void* user, Uint8* stream, int len) {
+    const u32 n = (u32)len / (kChannels * sizeof(float));
+    MixInto((float*)stream, n, *(const float*)user);
+}
+
+void RenderThread() {
+    static const float master = std::clamp(ConfigInt("Volume", 100), 0, 100) / 100.0f;
+    if (!SdlEnsure(SDL_INIT_AUDIO)) {
+        LOG("audio: SDL audio init failed (%s), audio is muted", SDL_GetError());
+        return;
+    }
+    SDL_AudioSpec want{}, have{};
+    want.freq = (int)kRate;
+    want.format = AUDIO_F32SYS;
+    want.channels = kChannels;  // SDL's 7.1 order is the Windows one: FL FR FC LFE BL BR SL SR
+    want.samples = 512;
+    want.callback = SdlCallback;
+    want.userdata = (void*)&master;
+    SDL_AudioDeviceID dev = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+    if (!dev) {
+        LOG("audio: no output device (%s), audio is muted", SDL_GetError());
+        return;
+    }
+    LOG("audio: SDL output (%s), 48 kHz 7.1 float, %u frame buffer, volume %.0f%%", SDL_GetCurrentAudioDriver(),
+        have.samples, master * 100);
+    g_device_ok = true;
+    SDL_PauseAudioDevice(dev, 0);
+}
+#endif
 
 void StartAudio() {
     static std::once_flag once;

@@ -18,5 +18,5 @@ for f in setup_shaders.py runtime_shaders.json iga.py igz.py export_shaders.py g
 done
 # Windows line endings for the batch file and the text files
 for f in "$D/setup.bat" "$D/README.txt" "$D/LICENSE.txt"; do sed -i 's/\r*$/\r/' "$f"; done
-(cd dist && powershell -NoProfile -Command "Compress-Archive -Force -Path 'CTR-NitroFueled-PC-$V' -DestinationPath 'CTR-NitroFueled-PC-$V.zip'")
+(cd dist && powershell -NoProfile -Command "Compress-Archive -Force -Path 'CTR-NitroFueled-PC-$V/*' -DestinationPath 'CTR-NitroFueled-PC-$V.zip'")
 ls -la "$D.zip"

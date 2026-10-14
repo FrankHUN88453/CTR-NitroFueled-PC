@@ -60,4 +60,5 @@ if(CTR_EMBED_DATA)
         "${CMAKE_SOURCE_DIR}/res/shaders.bin;${CMAKE_SOURCE_DIR}/res/glyphs_xbox.rgba")
 else()
     set_source_files_properties(res/app.rc PROPERTIES COMPILE_DEFINITIONS CTR_NO_EMBED)
+    target_link_options(${APP} PRIVATE "/PDBALTPATH:%_PDB%")  # no local build path in the exe
 endif()

@@ -20,7 +20,17 @@ Download the zip from [Releases](https://github.com/FrankHUN88453/CTR-NitroFuele
    then the game starts. Nothing else needs to be installed: the exe carries the setup.
 
 The built shaders live in `%LOCALAPPDATA%\CTRNF`; settings, saves and the log in `%APPDATA%\CTRNF`;
-graphics options are in the game's own Options > Video page. See [port/README.md](port/README.md) for building from source and test hooks.
+graphics options are in the game's own Options > Video page.
+
+### Linux / Steam Deck (experimental)
+
+The Linux build is an AppImage (D3D11 through DXVK native on Vulkan, SDL2 for the window, input and
+audio). Put `CTR-NitroFueled-PC-*-x86_64.AppImage` into the game folder next to `eboot.bin`, make it
+executable (`chmod +x`, or Properties > Permissions > "Is executable" in Dolphin) and start it. The
+first start builds the shaders with the system's `python3` and the bundled vkd3d HLSL compiler. On the
+Steam Deck add it to Steam as a non-Steam game, so that Steam Input hands the Deck's controls over as a
+controller; a fresh settings file starts with Deck-friendly values (720p internal, base PS4 mode,
+fullscreen). Shaders, settings, saves and the log live in `~/.local/share/CTRNF`. See [port/README.md](port/README.md) for building from source and test hooks.
 
 ## Source
 

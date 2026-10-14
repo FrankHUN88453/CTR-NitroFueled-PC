@@ -28,6 +28,13 @@ version, `src/first_start.cpp` unpacks it to %TEMP%, runs it with a progress win
 build/CrashTeamRacingNitroFueled.exe "F:/PS4/CRTNF/UP0002-CUSA13795_00-CRASHTEAMRACING1"
 ```
 
+Linux: the same sources with `src/platform/linux` — a Win32 shim (our `windows.h` on top of DXVK
+native's types: POSIX time / threads / timers / INI, TLS slots in a per-thread GS block, VirtualAlloc
+on mmap with write watching by page protection, XInput and keys on SDL2), the SDL2 window and audio,
+POSIX file I/O and signal-based crash logs. D3D11 comes from DXVK native. The CI
+(`.github/workflows/linux.yml`) builds it with clang, runs `--selftest` (the platform layer without the
+game) and packs the AppImage (`tools/make_appimage.sh`). `--selftest` runs on Windows too.
+
 Without an argument the exe uses its own folder when `eboot.bin` is there (double-click start);
 `./deploy.sh` copies it into the game folder. `./run.sh <seconds>` builds and runs a test with its own
 saves and settings in `run/userdata` (log: `run/CrashTeamRacingNitroFueled.log`).

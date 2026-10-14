@@ -12,6 +12,8 @@ void GfxDraw(u32 count, u64 index_addr, bool indexed);
 // Presents the surface at `addr` (a registered VideoOut buffer). false = not rendered yet.
 bool GfxPresent(u64 addr);
 bool GfxActive();
+// The translated shaders are there: embedded, or shaders.bin in the game folder (release builds).
+bool GfxShadersAvailable();
 // A video (Bink) was drawn within the last few frames.
 bool GfxVideoPlaying();
 // Where the game picture is in the window, as fractions of the client area: x0, y0, x1, y1

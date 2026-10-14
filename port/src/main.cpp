@@ -95,6 +95,17 @@ int main(int argc, char** argv) {
               exe_path.filename().string().c_str());
     }
     g_linker.game_dir = game.string();
+    if (!GfxShadersAvailable()) {
+        // a release exe carries nothing of the game: the shaders are made once from the player's dump
+        LOG("no shaders.bin in %s: run setup.bat first", g_linker.game_dir.c_str());
+        LogFlush();
+        MessageBoxW(nullptr,
+                    L"shaders.bin is missing from the game folder.\n\n"
+                    L"Run setup.bat once (it builds the shaders from your own game dump), then start the game "
+                    L"again.",
+                    L"Crash Team Racing Nitro-Fueled", MB_OK | MB_ICONINFORMATION);
+        return 1;
+    }
     ConfigInit();
     LOG("%s - native host for CTR Nitro-Fueled (CUSA13795)", exe_path.filename().string().c_str());
     LOG("game dir: %s", g_linker.game_dir.c_str());

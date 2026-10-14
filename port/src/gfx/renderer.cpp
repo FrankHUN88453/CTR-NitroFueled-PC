@@ -197,15 +197,30 @@ u64 Fnv(const u8* p, size_t n) {
     return h;
 }
 
-// Translated shaders embedded in the exe (RCDATA "SHADERS", tools/pack_shaders.py)
+// Translated shaders (tools/pack_shaders.py): embedded in the exe (RCDATA "SHADERS"), or - in a
+// release, which carries nothing of the game - shaders.bin in the game folder, made from the
+// player's own dump by tools/setup_shaders.py
 std::unordered_map<std::string, std::pair<const u8*, u32>> g_embedded;
+std::vector<u8> g_shader_file;
 
-std::string LoadEmbeddedShaders() {
+const u8* ShaderBlob(u32* total) {
     HRSRC r = FindResourceA(nullptr, "SHADERS", MAKEINTRESOURCEA(10) /* RT_RCDATA */);
     HGLOBAL g = r ? LoadResource(nullptr, r) : nullptr;
     const u8* p = g ? (const u8*)LockResource(g) : nullptr;
-    u32 total = r ? SizeofResource(nullptr, r) : 0;
-    if (!p || total < 12 || memcmp(p, "CTRS", 4) != 0) return {};
+    *total = r ? SizeofResource(nullptr, r) : 0;
+    if (p && *total >= 12 && memcmp(p, "CTRS", 4) == 0) return p;
+    if (g_shader_file.empty()) {
+        std::ifstream f(fs::path(g_linker.game_dir) / "shaders.bin", std::ios::binary);
+        g_shader_file.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    *total = (u32)g_shader_file.size();
+    return *total >= 12 && memcmp(g_shader_file.data(), "CTRS", 4) == 0 ? g_shader_file.data() : nullptr;
+}
+
+std::string LoadEmbeddedShaders() {
+    u32 total = 0;
+    const u8* p = ShaderBlob(&total);
+    if (!p) return {};
     u32 index_len = R<u32>((u64)p + 8);
     std::string index((const char*)p + 12, index_len);
     const u8* q = p + 12 + index_len;
@@ -233,7 +248,7 @@ void LoadShaderIndex() {
         index.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
     } else {
         index = LoadEmbeddedShaders();
-        g_shader_dir = "<embedded>";
+        g_shader_dir = g_shader_file.empty() ? "<embedded>" : "<shaders.bin>";
     }
     std::istringstream f(index);
     std::string line;
@@ -1472,6 +1487,12 @@ void SaveScreenshot(const char* path) {
 }
 
 }  // namespace
+
+bool GfxShadersAvailable() {
+    char env[MAX_PATH];
+    u32 total = 0;
+    return GetEnvironmentVariableA("CTR_SHADERS", env, MAX_PATH) || ShaderBlob(&total);
+}
 
 bool GfxActive() {
     return g_dev != nullptr;

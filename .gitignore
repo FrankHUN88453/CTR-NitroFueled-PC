@@ -14,4 +14,6 @@ assets/
 port/res/shaders.bin
 port/res/glyphs_xbox.rgba
 port/res/glyphs_xbox_preview.png
+port/build-release/
+port/dist/
 out/

@@ -1,0 +1,660 @@
+--- a/port/src/gfx/renderer.cpp
++++ b/port/src/gfx/renderer.cpp
+@@ -653,6 +653,18 @@
+     return d.Get();
+ }
+ 
++// debugging aid: CTR_CHECK_LATE=1 hashes the CPU-written vertex data and textures a draw used and again when
++// the frame is presented: a difference means the game wrote them after the draw was recorded
++// (the PS4 GPU reads them only when it runs the frame)
++const bool g_check_late = GetEnvironmentVariableA("CTR_CHECK_LATE", nullptr, 0) > 0;
++struct LateCheck {
++    const void* data;
++    u32 size;
++    u64 hash;
++    const struct ShaderInfo* si;
++};
++std::vector<LateCheck> g_late_checks;
++
+ ID3D11ShaderResourceView* GetTexture(const u32* tsharp, int dims) {
+     if (!tsharp) return dims == 3 ? g_placeholder.srv_array.Get() : g_placeholder.srv.Get();
+     TSharp t = DecodeTSharp(tsharp);
+@@ -684,8 +696,13 @@
+         // CPU-written textures (video frames, runtime atlases): rebuild when the guest wrote them
+         tx->second.checked_frame = g_frame;
+         if (GuestWrittenSince(tx->second.mem_base, tx->second.mem_size, false) &&
+-            RefreshTexture(g_ctx.Get(), t, &tx->second))
++            RefreshTexture(g_ctx.Get(), t, &tx->second)) {
+             g_stats.texture_refresh++;
++            if (g_check_late && tx->second.mem_size <= (8u << 20))
++                g_late_checks.push_back({(const void*)tx->second.mem_base, (u32)tx->second.mem_size,
++                                         Fnv((const u8*)tx->second.mem_base, tx->second.mem_size),
++                                         (const ShaderInfo*)2});
++        }
+     }
+     if (tx->second.button_atlas && dims != 3)
+         if (ID3D11ShaderResourceView* glyphs = ButtonAtlasOverride(g_dev.Get(), tx->second.fmt)) return glyphs;
+@@ -786,6 +803,17 @@
+ }
+ 
+ // ------------------------------------------------------------------ dynamic geometry
++u64 g_ring_draw = ~0ull;  // TEMP: draw that last wrote the constant ring
++// debugging aid: CTR_RACE_CHECK=1 re-reads the constants of every draw after it was issued (another
++// thread writing them meanwhile = a race), and verifies cached buffers the write watch calls unchanged
++const bool g_race_check = GetEnvironmentVariableA("CTR_RACE_CHECK", nullptr, 0) > 0;
++u32 TrapHash(const void* p, size_t n);
++struct RaceWatch {
++    const void* data;
++    u32 size, hash;
++    const struct ShaderInfo* si;
++};
++std::vector<RaceWatch> g_race_watch;
+ bool Upload(ComPtr<ID3D11Buffer>& ring, u32& pos, u32 cap, const void* src, u32 size, u32* offset) {
+     if (size > cap) return false;
+     D3D11_MAP mode = D3D11_MAP_WRITE_NO_OVERWRITE;
+@@ -793,6 +821,8 @@
+     if (pos + size > cap) {
+         pos = 0;
+         mode = D3D11_MAP_WRITE_DISCARD;
++        LOG("ring: %s ring wrapped at frame %llu draw #%llu", cap == (64u << 20) ? "vertex" : "index",
++            (unsigned long long)g_frame, (unsigned long long)g_stats.draws);
+     }
+     D3D11_MAPPED_SUBRESOURCE m;
+     double t0 = NowMs();
+@@ -818,6 +848,7 @@
+     u32 size;
+ };
+ 
++
+ // A draw's constants must all land in the same generation of the ring: a wrap (WRITE_DISCARD) between
+ // two of its stages would leave the parts written before it in the discarded copy, and the draw would
+ // read whatever the new copy holds there - single frames with huge stray triangles (black wedges,
+@@ -862,7 +893,11 @@
+     if (g_cb_ring_pos + total > kCbRing) {
+         g_cb_ring_pos = 0;
+         mode = D3D11_MAP_WRITE_DISCARD;
++
++        LOG("ring: constant ring wrapped at frame %llu draw #%llu (stage %d, %s)", (unsigned long long)g_frame,
++            (unsigned long long)g_stats.draws, stage, g_ring_draw == g_stats.draws ? "MID-DRAW" : "first of draw");
+     }
++    g_ring_draw = g_stats.draws;
+     D3D11_MAPPED_SUBRESOURCE m;
+     if (FAILED(g_ctx->Map(g_cb_ring.Get(), 0, mode, 0, &m))) return false;
+     UINT first[16], num[16];
+@@ -914,6 +949,7 @@
+                 data = (u64)patched;
+             }
+             parts[np++] = {(int)slot, (const void*)data, size};
++            if (g_race_check) g_race_watch.push_back({(const void*)data, size, TrapHash((const void*)data, size), si});
+             static const std::string after = [] {
+                 char v[128] = {};
+                 return GetEnvironmentVariableA("CTR_CAPTURE_AFTER", v, sizeof(v)) ? std::string(v) : std::string();
+@@ -991,6 +1027,69 @@
+ };
+ static_assert(sizeof(InfoCB) == 512);
+ float g_draw_scale = 1.0f;  // scale of the render target of the current draw
++// CTR_LOG_DRAWS=<frame>: per-frame draw counts from that frame on, and the draws a frame lacks
++// while the frames before and after have them (objects missing for single frames)
++const bool g_draw_log = GetEnvironmentVariableA("CTR_LOG_DRAWS", nullptr, 0) > 0;
++std::vector<std::pair<u64, std::string>> g_frame_draws;
++// CTR_GLITCH_TRAP=1 (with a recording): every draw is described in memory; when a recorded frame
++// suddenly turns much darker than the one before, the draws of both frames go to files next to it
++const bool g_glitch_trap = GetEnvironmentVariableA("CTR_GLITCH_TRAP", nullptr, 0) > 0;
++std::vector<std::string> g_trap_draws;
++// quick data identity for the trap: 8-byte words, every 8th word of large ranges
++u32 TrapHash(const void* p, size_t n) {
++    const u8* b = (const u8*)p;
++    u64 h = 0xcbf29ce484222325ull ^ n;
++    const size_t words = n / 8, step = n > 65536 ? 8 : 1;
++    for (size_t i = 0; i < words; i += step) {
++        u64 w;
++        memcpy(&w, b + i * 8, 8);
++        h = (h ^ w) * 0x100000001b3ull;
++        h ^= h >> 29;
++    }
++    for (size_t i = words * 8; i < n; i++) h = (h ^ b[i]) * 0x100000001b3ull;
++    return (u32)(h ^ (h >> 32));
++}
++std::vector<std::pair<u64, std::vector<std::string>>> g_trap_frames;  // the last frames' draws
++// with the trap: per draw pipeline statistics (pixel shader invocations: the pixels it covered)
++struct QueryFrame {
++    u64 frame = ~0ull;
++    int n = 0;
++    std::vector<ComPtr<ID3D11Query>> q;
++};
++QueryFrame g_qframes[8];
++ID3D11Query* g_query_open = nullptr;
++void QueryBegin() {
++    QueryFrame& f = g_qframes[g_frame % 8];
++    if (f.frame != g_frame) f.frame = g_frame, f.n = 0;
++    if (f.n >= (int)f.q.size()) {
++        D3D11_QUERY_DESC qd{D3D11_QUERY_PIPELINE_STATISTICS, 0};
++        f.q.emplace_back();
++        if (FAILED(g_dev->CreateQuery(&qd, &f.q.back()))) {
++            f.q.pop_back();
++            return;
++        }
++    }
++    g_query_open = f.q[f.n++].Get();
++    g_ctx->Begin(g_query_open);
++}
++void QueryEnd() {
++    if (g_query_open) g_ctx->End(g_query_open), g_query_open = nullptr;
++}
++// " ps N prims M" per draw of `frame`, in draw order
++std::vector<std::string> QueryResults(u64 frame) {
++    std::vector<std::string> out;
++    QueryFrame& f = g_qframes[frame % 8];
++    if (f.frame != frame) return out;
++    for (int i = 0; i < f.n; i++) {
++        D3D11_QUERY_DATA_PIPELINE_STATISTICS st{};
++        for (int k = 0; k < 1000 && g_ctx->GetData(f.q[i].Get(), &st, sizeof(st), 0) == S_FALSE; k++) Sleep(1);
++        char b[64];
++        snprintf(b, sizeof(b), " ps %llu prims %llu", (unsigned long long)st.PSInvocations,
++                 (unsigned long long)st.CPrimitives);
++        out.push_back(b);
++    }
++    return out;
++}
+ float g_tscale[2][32];      // per stage texture slot scales (BindTextures)
+ 
+ void WriteInfoCB(int stage, const u32* swz, const u32* vin) {
+@@ -1158,6 +1257,7 @@
+ constexpr u32 kCacheMin = 16 << 10;
+ struct GpuBuffer {
+     ComPtr<ID3D11Buffer> buf;
++    u32 hash = 0;  // CTR_RACE_CHECK: content when uploaded
+     u64 checked_frame = 0, used_frame = 0;
+     bool volatile_data = false;  // rewritten by the guest after creation: not cached any more
+ };
+@@ -1178,16 +1278,26 @@
+         GuestResetWritten(addr, size);
+         D3D11_SUBRESOURCE_DATA init{(const void*)addr};
+         if (FAILED(g_dev->CreateBuffer(&bd, &init, &e.buf))) return nullptr;
++        if (g_race_check) e.hash = TrapHash((const void*)addr, size);
+         e.checked_frame = g_frame;
+         g_stats.buffer_create++;
+     } else if (e.checked_frame != g_frame) {
+         e.checked_frame = g_frame;
+         if (GuestWrittenSince(addr, size, true)) {
++            if (g_draw_log) LOG("buffer %llx size %u (bind %u) rewritten: per-draw uploads from frame %llu",
++                                (unsigned long long)addr, size, bind, (unsigned long long)g_frame);
+             e.volatile_data = true;
+             e.buf.Reset();
+             g_stats.buffer_refresh++;
+             return nullptr;
+         }
++        if (g_race_check && TrapHash((const void*)addr, size) != e.hash) {
++            static int said = 0;
++            if (said++ < 40)
++                LOG("race check: buffer %llx size %u (bind %u) changed without the write watch noticing (frame %llu)",
++                    (unsigned long long)addr, size, bind, (unsigned long long)g_frame);
++            e.hash = TrapHash((const void*)addr, size);
++        }
+     }
+     return e.buf.Get();
+ }
+@@ -1418,6 +1528,97 @@
+     }
+ }
+ 
++// CTR_GLITCH_TRAP=2: small snapshots of the color / depth target at every target change of the
++// last frames; when the trap fires they are saved next to the draw lists (which pass broke it)
++const bool g_snap_on = [] {
++    char v[8] = {};
++    return GetEnvironmentVariableA("CTR_GLITCH_TRAP", v, sizeof(v)) && v[0] == '2';
++}();
++constexpr int kSnapFrames = 8, kSnapMax = 420;
++constexpr u32 kSnapW = 192, kSnapH = 108;
++struct Snap {
++    ComPtr<ID3D11Texture2D> tex;
++    ComPtr<ID3D11RenderTargetView> rtv;
++    char label[200];
++};
++struct SnapFrame {
++    u64 frame = ~0ull;
++    int n = 0;
++    Snap s[kSnapMax];
++};
++SnapFrame* g_snaps = nullptr;
++u64 g_snap_rt = 0, g_snap_z = 0;  // targets of the previous draw
++char g_snap_last[160];            // the previous draw
++
++void TakeSnap(u64 base, bool depth, const char* why) {
++    if (!g_snaps) g_snaps = new SnapFrame[kSnapFrames];
++    SnapFrame& f = g_snaps[g_frame % kSnapFrames];
++    if (f.frame != g_frame) f.frame = g_frame, f.n = 0;
++    if (f.n >= kSnapMax) return;
++    auto it = g_surfaces.find(base);
++    if (it == g_surfaces.end() || !it->second.srv || !g_blit_vs) return;
++    Snap& sn = f.s[f.n];
++    if (!sn.tex) {
++        D3D11_TEXTURE2D_DESC td{};
++        td.Width = kSnapW, td.Height = kSnapH, td.MipLevels = td.ArraySize = 1;
++        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM, td.SampleDesc.Count = 1;
++        td.BindFlags = D3D11_BIND_RENDER_TARGET;
++        if (FAILED(g_dev->CreateTexture2D(&td, nullptr, &sn.tex))) return;
++        g_dev->CreateRenderTargetView(sn.tex.Get(), nullptr, &sn.rtv);
++    }
++    snprintf(sn.label, sizeof(sn.label), "%03d_%s_%llx_%s", f.n, depth ? "z" : "c", (unsigned long long)base, why);
++    f.n++;
++    ID3D11ShaderResourceView* none[32] = {};
++    g_ctx->PSSetShaderResources(0, 32, none);
++    g_ctx->OMSetRenderTargets(1, sn.rtv.GetAddressOf(), nullptr);
++    D3D11_VIEWPORT v{0, 0, (float)kSnapW, (float)kSnapH, 0, 1};
++    g_ctx->RSSetViewports(1, &v);
++    g_ctx->RSSetState(GetRaster(0, false));
++    g_ctx->OMSetDepthStencilState(g_depth_off.Get(), 0);
++    g_ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
++    g_ctx->IASetInputLayout(nullptr);
++    g_ctx->GSSetShader(nullptr, nullptr, 0);
++    g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
++    g_ctx->VSSetShader(g_blit_vs.Get(), nullptr, 0);
++    g_ctx->PSSetShader(g_blit_ps.Get(), nullptr, 0);
++    g_ctx->PSSetShaderResources(0, 1, it->second.srv.GetAddressOf());
++    g_ctx->PSSetSamplers(0, 1, g_samp_linear.GetAddressOf());
++    g_ctx->Draw(3, 0);
++    g_ctx->PSSetShaderResources(0, 32, none);
++}
++
++// before a draw: snapshot the targets the previous draws rendered into when they change
++void SnapTargets(u64 rt, u64 z, const char* what) {
++    if (rt != g_snap_rt && g_snap_rt) TakeSnap(g_snap_rt, false, g_snap_last);
++    if (z != g_snap_z && g_snap_z) TakeSnap(g_snap_z, true, g_snap_last);
++    g_snap_rt = rt, g_snap_z = z;
++    snprintf(g_snap_last, sizeof(g_snap_last), "%s", what);
++}
++
++void SaveSnaps(const fs::path& dir, u64 frame) {
++    if (!g_snaps) return;
++    SnapFrame& f = g_snaps[frame % kSnapFrames];
++    if (f.frame != frame) return;
++    D3D11_TEXTURE2D_DESC td{};
++    td.Width = kSnapW, td.Height = kSnapH, td.MipLevels = td.ArraySize = 1;
++    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM, td.SampleDesc.Count = 1;
++    td.Usage = D3D11_USAGE_STAGING, td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
++    ComPtr<ID3D11Texture2D> st;
++    if (FAILED(g_dev->CreateTexture2D(&td, nullptr, &st))) return;
++    for (int i = 0; i < f.n; i++) {
++        g_ctx->CopyResource(st.Get(), f.s[i].tex.Get());
++        D3D11_MAPPED_SUBRESOURCE m;
++        if (SUCCEEDED(g_ctx->Map(st.Get(), 0, D3D11_MAP_READ, 0, &m))) {
++            std::string name = "snap_" + std::to_string(frame) + "_" + f.s[i].label;
++            for (char& c : name)
++                if (!isalnum((unsigned char)c) && c != '_' && c != '-') c = '_';
++            WriteBmp((dir / (name.substr(0, 150) + ".bmp")).string().c_str(), (const u8*)m.pData, kSnapW, kSnapH,
++                     m.RowPitch, false);
++            g_ctx->Unmap(st.Get(), 0);
++        }
++    }
++}
++
+ void SaveScreenshot(const char* path) {
+     ComPtr<ID3D11Texture2D> bb, st;
+     g_swap->GetBuffer(0, IID_PPV_ARGS(&bb));
+@@ -1483,12 +1684,38 @@
+     DrawTimer timer;
+     double sec_t = NowMs();
+     g_stats.draws++;
++    g_race_watch.clear();
++    {  // TEMP experiment: CTR_DRAW_DELAY_US=<n> makes every draw that much slower (timing races)
++        static const int delay = [] {
++            char v[16] = {};
++            return GetEnvironmentVariableA("CTR_DRAW_DELAY_US", v, sizeof(v)) ? atoi(v) : 0;
++        }();
++        if (delay) {
++            LARGE_INTEGER f, a, b;
++            QueryPerformanceFrequency(&f), QueryPerformanceCounter(&a);
++            do QueryPerformanceCounter(&b);
++            while ((b.QuadPart - a.QuadPart) * 1000000 / f.QuadPart < delay);
++        }
++    }
+     u64 dev = Q((u64)g_linker.eboot->base + kDeviceGlobal);
+     u64 ctx = Q(dev + DEV_CONTEXT);
+     if (!ctx) return;
++    {  // DEBUG: which threads draw, with which device contexts
++        static std::unordered_set<u64> seen;
++        const u64 key = (u64)GetCurrentThreadId() << 40 ^ ctx;
++        if (seen.size() < 64 && seen.insert(key).second)
++            LOG("gfx: thread %lu draws with context %llx (frame %llu)", GetCurrentThreadId(), (unsigned long long)ctx,
++                (unsigned long long)g_frame);
++    }
+     u64 vsh = Q(ctx + CTX_VS), psh = Q(ctx + CTX_PS);
+     ShaderInfo* vs = GetShader(vsh, true);
+     ShaderInfo* ps = psh ? GetShader(psh, false) : nullptr;
++    if (g_draw_log) {  // CTR_LOG_DRAWS: this draw's identity for the frame-to-frame comparison
++        const u64 vb = Q(ctx + CTX_VERTEX_BUFFERS);
++        const u64 key = Fnv((const u8*)&vb, 8) ^ (index_addr * 0x9E3779B97F4A7C15ull) ^ ((u64)count << 40) ^
++                        (u64)(uintptr_t)vs * 31 ^ (u64)(uintptr_t)ps * 131;
++        g_frame_draws.push_back({key, (vs ? vs->name : "-") + "/" + (ps ? ps->name : "-")});
++    }
+     if (ps && ps->video) g_video_ms = (u64)GetTickCount64();
+     // an export shader runs in front of a geometry shader (with its embedded copy VS)
+     u64 gsh = vs && vs->kind == "es" ? Q(ctx + CTX_GS) : 0;
+@@ -1514,6 +1741,17 @@
+         g_stats.no_shader++;
+         return;
+     }
++    if (g_snap_on) {
++        const u64 h0 = Q(ctx + CTX_COLOR_TARGETS), dh0 = Q(ctx + CTX_DEPTH_TARGET);
++        const u64 rt = h0 && Readable(h0, 0x50) ? (u64)R<u32>(h0 + 0x10) << 8 : 0;
++        const u64 z = dh0 && Readable(dh0, 0x84) ? (u64)R<u32>(dh0 + 0x58) << 8 : 0;
++        char what[160];
++        snprintf(what, sizeof(what), "%llu_%s_%s", (unsigned long long)g_stats.draws, vs ? vs->name.c_str() : "-",
++                 ps ? ps->name.c_str() : "-");
++        SnapTargets(rt, z, what);
++        static u32 since = 0;  // and the depth target every 16 draws (which draw broke it)
++        if (z && ++since >= 16) since = 0, TakeSnap(z, true, what);
++    }
+     // render targets + viewport
+     ID3D11RenderTargetView* rtv[8] = {};
+     u32 nrt = 0;
+@@ -1652,6 +1890,7 @@
+ 
+     SECTION(4);
+     bool used[16] = {};
++    char vb_path[16] = {};  // per slot: C = cached GPU buffer, R = upload ring (glitch trap)
+     VbBinding vbs[16];
+     u32 vin_modes[32] = {};
+     ID3D11InputLayout* layout = GetLayout(ctx, vsh, vs, vbs, used, vin_modes);
+@@ -1664,31 +1903,87 @@
+     // all ring uploads of a draw in one generation of the ring (see CbRingReserve): when it wraps after
+     // an earlier slot of the draw, that slot's data went with the discarded copy - upload them again
+     for (int pass = 0; pass < 2; pass++) {
+-        bool ring_used = false, wrapped = false;
+-        for (int slot = 0; slot < 16; slot++) {
+-            if (!used[slot]) continue;
+-            ID3D11Buffer* b = nullptr;
+-            UINT stride = 0, off = 0;
+-            if (slot == 15) {
+-                b = g_zero_vb.Get();
+-            } else if (vbs[slot].size >= kCacheMin && vbs[slot].addr >= vbs[slot].base &&
+-                       vbs[slot].addr < vbs[slot].base + vbs[slot].size && Readable(vbs[slot].base, vbs[slot].size) &&
+-                       (b = CachedBuffer(vbs[slot].base, vbs[slot].size, D3D11_BIND_VERTEX_BUFFER))) {
+-                stride = vbs[slot].stride;
+-                off = (UINT)(vbs[slot].addr - vbs[slot].base);
+-            } else {
+-                scan_max_index();
+-                u64 bytes = (u64)(max_index + 1) * vbs[slot].stride;
+-                if (!vbs[slot].stride || !Readable(vbs[slot].addr, bytes)) return;
+-                if (!Upload(g_vb_ring, g_vb_pos, kVbRing, (const void*)vbs[slot].addr, (u32)bytes, &off)) return;
+-                wrapped |= ring_used && off == 0;
+-                ring_used = true;
+-                b = g_vb_ring.Get();
+-                stride = vbs[slot].stride;
++    bool ring_used = false, wrapped = false;
++    for (int slot = 0; slot < 16; slot++) {
++        if (!used[slot]) continue;
++        ID3D11Buffer* b = nullptr;
++        UINT stride = 0, off = 0;
++        if (slot == 15) {
++            b = g_zero_vb.Get();
++        } else if (vbs[slot].size >= kCacheMin && vbs[slot].addr >= vbs[slot].base &&
++                   vbs[slot].addr < vbs[slot].base + vbs[slot].size && Readable(vbs[slot].base, vbs[slot].size) &&
++                   (b = CachedBuffer(vbs[slot].base, vbs[slot].size, D3D11_BIND_VERTEX_BUFFER))) {
++            stride = vbs[slot].stride;
++            off = (UINT)(vbs[slot].addr - vbs[slot].base);
++        } else {
++            scan_max_index();
++            u64 bytes = (u64)(max_index + 1) * vbs[slot].stride;
++            if (!vbs[slot].stride || !Readable(vbs[slot].addr, bytes)) return;
++            if (!Upload(g_vb_ring, g_vb_pos, kVbRing, (const void*)vbs[slot].addr, (u32)bytes, &off)) return;
++            wrapped |= ring_used && off == 0;
++            ring_used = true;
++            if (g_check_late)
++                g_late_checks.push_back({(const void*)vbs[slot].addr, (u32)bytes,
++                                         Fnv((const u8*)vbs[slot].addr, (size_t)bytes), (const ShaderInfo*)1});
++            b = g_vb_ring.Get();
++            stride = vbs[slot].stride;
++        }
++        g_ctx->IASetVertexBuffers(slot, 1, &b, &stride, &off);
++        vb_path[slot] = slot == 15 ? 'Z' : b == g_vb_ring.Get() ? 'R' : 'C';
++    }
++    if (!wrapped) break;
++    }
++    if (g_glitch_trap) {
++        char b[1024];
++        int o = snprintf(b, sizeof(b), "#%llu %zu %s %s prim %u count %u idx %d/%u at %llx max %u rt0 %llx", (unsigned long long)g_stats.draws, g_trap_draws.size(),
++                         vs ? vs->name.c_str() : "-", ps ? ps->name.c_str() : "-", R<u32>(ctx + CTX_PRIM_TYPE), count,
++                         indexed, isize, (unsigned long long)index_addr, max_index,
++                         (unsigned long long)(Q(ctx + CTX_COLOR_TARGETS) && Readable(Q(ctx + CTX_COLOR_TARGETS), 0x20)
++                                                  ? (u64)R<u32>(Q(ctx + CTX_COLOR_TARGETS) + 0x10) << 8 : 0));
++        for (int slot = 0; slot < 15 && o < (int)sizeof(b) - 80; slot++)
++            if (used[slot])
++                o += snprintf(b + o, sizeof(b) - o, " vb%d %llx+%llx size %u stride %u %s", slot,
++                              (unsigned long long)vbs[slot].base, (unsigned long long)(vbs[slot].addr - vbs[slot].base),
++                              vbs[slot].size, vbs[slot].stride, vbs[slot].size >= kCacheMin ? "C" : "R");
++        // data identity: what the draw reads (vertex range, indices, VS constants)
++        for (int slot = 0; slot < 15 && g_snap_on && o < (int)sizeof(b) - 40; slot++)
++            if (used[slot]) {
++                const u64 n = (u64)(max_index + 1) * vbs[slot].stride;
++                o += snprintf(b + o, sizeof(b) - o, " vh%d %c %08x", slot, vb_path[slot],
++                              Readable(vbs[slot].addr, n) ? TrapHash((const void*)vbs[slot].addr, (size_t)n) : 0u);
++            }
++        if (indexed && g_snap_on && o < (int)sizeof(b) - 40)
++            o += snprintf(b + o, sizeof(b) - o, " ih %08x", TrapHash(idata, (size_t)count * isize));
++        if (g_snap_on) {
++            u64 hdr = Q(vsh + SH_HEADER);
++            s32 n = R<s32>(hdr + HDR_CB_MEMORY);
++            u64 mem = Q(hdr + HDR_CB_MEMORY + 0x10), sizes = Q(hdr + HDR_CB_SIZE + 0x10);
++            for (s32 k = 0; k < n && k < 4 && o < (int)sizeof(b) - 60; k++) {
++                u64 data = Q(mem + k * 8);
++                u32 size = (u32)R<u64>(sizes + k * 8);
++                if (data && size && size <= 65536 && Readable(data, size))
++                    o += snprintf(b + o, sizeof(b) - o, " cb%d %llx/%u %08x", k, (unsigned long long)data, size,
++                                  TrapHash((const void*)data, size));
++            }
++        }
++        std::string line = b;
++        if (g_snap_on) {  // the VS constants themselves (cb0, up to 512 bytes)
++            u64 hdr = Q(vsh + SH_HEADER);
++            u64 mem = Q(hdr + HDR_CB_MEMORY + 0x10), sizes = Q(hdr + HDR_CB_SIZE + 0x10);
++            u64 data = R<s32>(hdr + HDR_CB_MEMORY) > 0 ? Q(mem) : 0;
++            u32 size = data ? (u32)R<u64>(sizes) : 0;
++            if (data && size && size <= 512 && Readable(data, size)) {
++                line += " CB";
++                char f[24];
++                for (u32 i = 0; i < size / 4; i++) {
++                    snprintf(f, sizeof(f), " %.5g", R<float>(data + i * 4));
++                    line += f;
++                }
+             }
+-            g_ctx->IASetVertexBuffers(slot, 1, &b, &stride, &off);
+         }
+-        if (!wrapped) break;
++        g_trap_draws.emplace_back(std::move(line));
++        QueryEnd();
++        QueryBegin();
+     }
+     SECTION(5);
+     g_ctx->IASetPrimitiveTopology(topo);
+@@ -1721,6 +2016,18 @@
+         g_ctx->Draw(count, 0);
+     }
+     g_stats.drawn++;
++    if (g_glitch_trap) QueryEnd();
++    if (g_race_check) {
++        for (const RaceWatch& w : g_race_watch)
++            if (TrapHash(w.data, w.size) != w.hash) {
++                static u64 n = 0;
++                if (n++ < 60 || (n & (n - 1)) == 0)
++                    LOG("race check: constants %llx/%u of %s changed while the draw was issued (frame %llu, %llu so far)",
++                        (unsigned long long)(uintptr_t)w.data, w.size, w.si ? w.si->name.c_str() : "?",
++                        (unsigned long long)g_frame, (unsigned long long)n);
++            }
++        g_race_watch.clear();
++    }
+     if (g_capture) DrainDebugMessages(64);  // hazards next to the draw that caused them (CTR_D3D_DEBUG=1)
+     // debugging aid: CTR_CAPTURE_AFTER=<shader name part> saves render target 0 right after each
+     // matching draw of the captured frame
+@@ -2000,11 +2307,8 @@
+ std::mutex g_record_mutex;
+ std::condition_variable g_record_cv;
+ std::vector<std::pair<std::string, std::vector<u8>>> g_record_queue;
+-// test runs: CTR_RECORD_SIZE=<w>x<h> (smaller frames for long recordings), CTR_RECORD_FRAMES=<n>, and
+-// CTR_GLITCH_TRAP=1, which keeps only the frames that turn suddenly dark (and the one before each),
+-// logged as "glitch trap" - a long recorded drive without such lines has no single-frame glitches
++// test runs: CTR_RECORD_SIZE=<w>x<h> (smaller frames for long recordings), CTR_RECORD_FRAMES=<n>
+ u32 kRecordW = 1280, kRecordH = 720;
+-const bool g_glitch_trap = GetEnvironmentVariableA("CTR_GLITCH_TRAP", nullptr, 0) > 0;
+ 
+ void RecordWriter() {
+     for (;;) {
+@@ -2025,8 +2329,12 @@
+     static ComPtr<ID3D11Texture2D> scaled, ring[4];
+     static ComPtr<ID3D11RenderTargetView> rtv;
+     static int ring_frame[4] = {-1, -1, -1, -1};
++    static u64 ring_gframe[4] = {};
+     static float last_dark = 0;
++    // CTR_TRAP_ONLY=1: only the frames the glitch trap fires on (and the one before) are saved
++    static const bool trap_only = GetEnvironmentVariableA("CTR_TRAP_ONLY", nullptr, 0) > 0;
+     static std::vector<u8> prev_px;
++    static int prev_n = -1;
+     auto drain = [&](int slot) {  // the slot's frame to the writer
+         if (ring_frame[slot] < 0) return;
+         D3D11_MAPPED_SUBRESOURCE m;
+@@ -2035,24 +2343,44 @@
+             for (u32 y = 0; y < kRecordH; y++)
+                 memcpy(&px[(size_t)y * kRecordW * 4], (const u8*)m.pData + (size_t)y * m.RowPitch, kRecordW * 4);
+             g_ctx->Unmap(ring[slot].Get(), 0);
+-            if (g_glitch_trap) {  // only frames much darker than the one before, with that one
++            bool fired = false;
++            if (g_glitch_trap) {  // a sudden dark area: dump the draws of this frame and the one before
+                 u32 dark = 0, total = 0;
+                 for (size_t i = 0; i < px.size(); i += 4 * 7, total++)
+                     if (px[i] + px[i + 1] + px[i + 2] < 18) dark++;
+-                const float frac = total ? (float)dark / total : 0, before = last_dark;
+-                last_dark = frac;
+-                std::vector<u8> prev = std::move(prev_px);
+-                prev_px = px;
+-                if (frac - before <= 0.08f) {
+-                    ring_frame[slot] = -1;
+-                    return;
++                const float frac = total ? (float)dark / total : 0;
++                if (frac - last_dark > 0.08f) {
++                    fired = true;
++                    const u64 gf = ring_gframe[slot];
++                    LOG("glitch trap: frame %llu (recording %d) %.0f%% dark after %.0f%%", (unsigned long long)gf,
++                        ring_frame[slot], frac * 100, last_dark * 100);
++                    if (g_snap_on) SaveSnaps(dir, gf), SaveSnaps(dir, gf - 1), SaveSnaps(dir, gf - 2);
++                    for (auto& [f, draws] : g_trap_frames)
++                        if (f == gf || f + 1 == gf || f + 2 == gf) {
++                            const std::vector<std::string> qs = QueryResults(f);
++                            for (size_t i = 0; i < draws.size() && i < qs.size(); i++) draws[i] += qs[i];
++                            char fn[48];
++                            snprintf(fn, sizeof(fn), "draws_%llu.txt", (unsigned long long)f);
++                            if (FILE* out = fopen((dir / fn).string().c_str(), "w")) {
++                                for (auto& d : draws) fprintf(out, "%s\n", d.c_str());
++                                fclose(out);
++                            }
++                        }
+                 }
+-                LOG("glitch trap: recording %d %.0f%% dark after %.0f%%", ring_frame[slot], frac * 100, before * 100);
+-                if (!prev.empty()) {
++                last_dark = frac;
++            }
++            if (trap_only) {
++                if (fired && prev_n >= 0) {
+                     char name[32];
+-                    snprintf(name, sizeof(name), "frame_%04d.bmp", ring_frame[slot] - 1);
++                    snprintf(name, sizeof(name), "frame_%04d.bmp", prev_n);
+                     std::lock_guard lk(g_record_mutex);
+-                    g_record_queue.emplace_back((dir / name).string(), std::move(prev));
++                    g_record_queue.emplace_back((dir / name).string(), prev_px);
++                    g_record_cv.notify_one();
++                }
++                prev_px = px, prev_n = ring_frame[slot];
++                if (!fired) {
++                    ring_frame[slot] = -1;
++                    return;
+                 }
+             }
+             char name[32];
+@@ -2097,7 +2425,7 @@
+         std::error_code ec;
+         fs::create_directories(dir, ec);
+         left = frames, n = 0;
+-        LOG("gfx: recording %d frames into %s", frames, dir.string().c_str());
++        LOG("gfx: recording %d frames into %s from frame %llu", frames, dir.string().c_str(), (unsigned long long)g_frame);
+     }
+     if (left <= 0) {
+         for (int s = 0; s < 4; s++) drain(s);  // the last few after the recording
+@@ -2115,6 +2443,7 @@
+     g_ctx->Draw(3, 0);
+     g_ctx->CopyResource(ring[slot].Get(), scaled.Get());
+     ring_frame[slot] = n++;
++    ring_gframe[slot] = g_frame;
+     left--;
+ }
+ }  // namespace
+@@ -2144,6 +2473,70 @@
+         prev = out;
+         g_trace.clear();
+     }
++    if (g_snap_on) SnapTargets(0, 0, "present");
++    if (g_glitch_trap) {
++        g_trap_frames.emplace_back(g_frame, std::move(g_trap_draws));
++        g_trap_draws.clear();
++        if (g_trap_frames.size() > 12) g_trap_frames.erase(g_trap_frames.begin());
++    }
++    if (g_check_late) {
++        std::unordered_map<std::string, int> late;
++        size_t n = 0;
++        for (const LateCheck& c : g_late_checks)
++            if (Fnv((const u8*)c.data, c.size) != c.hash)
++                late[c.si == (const ShaderInfo*)1 ? "vertex data" : c.si == (const ShaderInfo*)2 ? "texture" : c.si ? c.si->name : "?"]++, n++;
++        if (n) {
++            std::string list;
++            int shown = 0;
++            for (auto& [name, k] : late)
++                if (shown++ < 8) list += " " + name + "x" + std::to_string(k);
++            LOG("frame %llu: %zu of %zu constant buffers changed after their draw:%s", (unsigned long long)g_frame, n,
++                g_late_checks.size(), list.c_str());
++        }
++        g_late_checks.clear();
++    }
++    {  // debugging aid: CTR_LOG_DRAWS=<first frame> logs the draws of every frame from there on
++        static const u64 from = [] {
++            char v[32] = {};
++            return GetEnvironmentVariableA("CTR_LOG_DRAWS", v, sizeof(v)) ? strtoull(v, nullptr, 10) : 0ull;
++        }();
++        static u64 last_draws = 0, last_drawn = 0, last_skipped = 0;
++        const u64 skipped = g_stats.no_shader + g_stats.no_target + g_stats.no_layout;
++        if (from && g_frame >= from)
++            LOG("frame %llu: %llu draws, %llu drawn, %llu skipped", (unsigned long long)g_frame,
++                (unsigned long long)(g_stats.draws - last_draws), (unsigned long long)(g_stats.drawn - last_drawn),
++                (unsigned long long)(skipped - last_skipped));
++        static std::vector<std::pair<u64, std::string>> hist[3];  // two frames ago, last frame, this one
++        hist[0] = std::move(hist[1]), hist[1] = std::move(hist[2]), hist[2] = std::move(g_frame_draws);
++        g_frame_draws.clear();
++        if (from && g_frame >= from + 2) {
++            std::unordered_map<u64, int> before, mid, after;
++            for (auto& d : hist[0]) before[d.first]++;
++            for (auto& d : hist[1]) mid[d.first]++;
++            for (auto& d : hist[2]) after[d.first]++;
++            std::unordered_map<std::string, int> missing;
++            for (auto& d : hist[1 - 1]) {
++                const int want = std::min(before[d.first], after[d.first]);
++                if (want > mid[d.first]) missing[d.second]++, mid[d.first]++;  // count each lack once
++            }
++            if (!missing.empty()) {
++                std::string list;
++                for (auto& [name, n] : missing) list += " " + name + "x" + std::to_string(n);
++                LOG("frame %llu lacks:%s", (unsigned long long)(g_frame - 1), list.c_str());
++            }
++            // and draws only that frame has
++            std::unordered_map<u64, int> seen;
++            std::unordered_map<std::string, int> extra;
++            for (auto& d : hist[1])
++                if (++seen[d.first] > std::max(before[d.first], after[d.first])) extra[d.second]++;
++            if (!extra.empty() && extra.size() < 40) {
++                std::string list;
++                for (auto& [name, n] : extra) list += " " + name + "x" + std::to_string(n);
++                LOG("frame %llu adds:%s", (unsigned long long)(g_frame - 1), list.c_str());
++            }
++        }
++        last_draws = g_stats.draws, last_drawn = g_stats.drawn, last_skipped = skipped;
++    }
+     g_frame++;
+     static bool removed_logged = false;
+     if (HRESULT rr = g_dev->GetDeviceRemovedReason(); rr != S_OK && !removed_logged) {

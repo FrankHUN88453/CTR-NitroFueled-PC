@@ -1,0 +1,17 @@
+elf/
+out/eboot.strings.txt
+__pycache__/
+data/nid_names.txt
+.venv/
+ghidra_proj/
+out/*.pkl
+assets_test/
+assets/
+port/build/
+port/run/
+out/hlsl/*.dxbc
+assets/
+port/res/shaders.bin
+port/res/glyphs_xbox.rgba
+port/res/glyphs_xbox_preview.png
+out/

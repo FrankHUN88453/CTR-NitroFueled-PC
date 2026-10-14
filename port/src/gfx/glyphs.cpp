@@ -20,6 +20,7 @@ using std::min;
 #include <fstream>
 
 #include "../hle/pad.h"
+#include "../first_start.h"
 #include "../linker.h"
 
 using Microsoft::WRL::ComPtr;
@@ -251,15 +252,18 @@ std::vector<u8> DrawKeyboardAtlas(bool menu) {
 std::vector<u8> DrawMenuAtlas() { return DrawKeyboardAtlas(true); }
 std::vector<u8> DrawDrivingAtlas() { return DrawKeyboardAtlas(false); }
 
-// embedded in the exe, or (release builds) glyphs_xbox.rgba in the game folder from tools/setup_shaders.py
+// embedded in the exe, or (release builds) glyphs_xbox.rgba made by the first-start setup
 std::vector<u8> LoadXboxAtlas() {
     HRSRC res = FindResourceA(nullptr, "GLYPHS_XBOX", MAKEINTRESOURCEA(10) /* RT_RCDATA */);
     HGLOBAL h = res ? LoadResource(nullptr, res) : nullptr;
     const u8* p = h ? (const u8*)LockResource(h) : nullptr;
     if (p && SizeofResource(nullptr, res) == kAtlasBytes) return {p, p + kAtlasBytes};
-    std::ifstream f(std::filesystem::path(g_linker.game_dir) / "glyphs_xbox.rgba", std::ios::binary);
-    std::vector<u8> v(std::istreambuf_iterator<char>(f), {});
-    return v.size() == kAtlasBytes ? v : std::vector<u8>{};
+    for (const std::filesystem::path& dir : {ShaderCacheDir(), std::filesystem::path(g_linker.game_dir)}) {
+        std::ifstream f(dir / "glyphs_xbox.rgba", std::ios::binary);
+        std::vector<u8> v(std::istreambuf_iterator<char>(f), {});
+        if (v.size() == kAtlasBytes) return v;
+    }
+    return {};
 }
 
 ID3D11ShaderResourceView* Get(View& v, ID3D11Device* dev, DXGI_FORMAT fmt, std::vector<u8> (*make)(), const char* what) {

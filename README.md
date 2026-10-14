@@ -13,14 +13,14 @@ with Win32 replacements of the PS4 system libraries and a D3D11 renderer.
 
 Download the zip from [Releases](https://github.com/FrankHUN88453/CTR-NitroFueled-PC/releases), then:
 
-1. Extract it into your game folder (your own dump of CUSA13795, EU, base version 1.00), next to
-   `eboot.bin`.
-2. Run `setup.bat` once (needs Python 3.8+). It builds `shaders.bin` from your dump, and the Xbox
-   button glyphs when Crash Bandicoot N. Sane Trilogy for PC is installed.
-3. Start `CrashTeamRacingNitroFueled.exe`.
+1. Copy `CrashTeamRacingNitroFueled.exe` into your game folder (your own dump of CUSA13795, EU, base
+   version 1.00), next to `eboot.bin`.
+2. Start it. The first start builds the shaders from your dump (a few minutes, once, with a progress
+   window), plus the Xbox button glyphs when Crash Bandicoot N. Sane Trilogy for PC is installed;
+   then the game starts. Nothing else needs to be installed: the exe carries the setup.
 
-Settings, saves and the log live in `%APPDATA%\CTRNF`; graphics options are in the game's own
-Options > Video page. See [port/README.md](port/README.md) for building from source and test hooks.
+The built shaders live in `%LOCALAPPDATA%\CTRNF`; settings, saves and the log in `%APPDATA%\CTRNF`;
+graphics options are in the game's own Options > Video page. See [port/README.md](port/README.md) for building from source and test hooks.
 
 ## Source
 
@@ -44,7 +44,8 @@ Options > Video page. See [port/README.md](port/README.md) for building from sou
 - `tools/iga.py` – `.pak` (IGA v13) lister / extractor
 - `tools/igz.py` – `.igz` (v10) reader, objects decoded with the reflection data
 - `tools/gcn.py`, `tools/gcn2hlsl.py` – GCN shader decoder and GCN → HLSL translator
-- `tools/setup_shaders.py` – the release setup: shaders and button glyphs from the player's dump
+- `tools/setup_shaders.py` – the release setup: shaders and button glyphs from the player's dump;
+  `tools/pack_setup.py` packs it with a minimal Python runtime into the release exe
 - `ghidra_scripts/` – `ApplyPs4Symbols.java` (pre-script), `ApplyAlchemyMeta.java`
 - `port/` – the native runner (see [port/README.md](port/README.md))
 - `elf/` – extracted ELFs, `data/` – NID name list, `out/` – generated data (none of them in git)

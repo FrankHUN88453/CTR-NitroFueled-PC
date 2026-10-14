@@ -12,6 +12,10 @@ SHADERS RCDATA "shaders.bin"
 // Xbox button glyphs in the layout of the game's button atlas (tools/make_glyph_atlas.py, made by
 // build.bat from the Crash Bandicoot N. Sane Trilogy PC files; empty when those are not installed)
 GLYPHS_XBOX RCDATA "glyphs_xbox.rgba"
+#else
+// the first-start setup that makes them from the player's dump (tools/pack_setup.py: a minimal
+// Python runtime + tools/setup_shaders.py), made by build_release.bat
+SETUP RCDATA "setup.bin"
 #endif
 
 VS_VERSION_INFO VERSIONINFO

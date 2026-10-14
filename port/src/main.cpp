@@ -8,6 +8,7 @@
 #include "common.h"
 #include "linker.h"
 #include "thread.h"
+#include "first_start.h"
 #include "gfx/gfx.h"
 #include "patches.h"
 #include "config.h"
@@ -95,15 +96,10 @@ int main(int argc, char** argv) {
               exe_path.filename().string().c_str());
     }
     g_linker.game_dir = game.string();
-    if (!GfxShadersAvailable()) {
-        // a release exe carries nothing of the game: the shaders are made once from the player's dump
-        LOG("no shaders.bin in %s: run setup.bat first", g_linker.game_dir.c_str());
+    // a release exe carries nothing of the game: on the first start (or after an update that
+    // translates the shaders differently) they are made from the player's dump
+    if (!GfxShadersAvailable() && (!RunFirstStartSetup(game) || !GfxShadersAvailable())) {
         LogFlush();
-        MessageBoxW(nullptr,
-                    L"shaders.bin is missing from the game folder.\n\n"
-                    L"Run setup.bat once (it builds the shaders from your own game dump), then start the game "
-                    L"again.",
-                    L"Crash Team Racing Nitro-Fueled", MB_OK | MB_ICONINFORMATION);
         return 1;
     }
     ConfigInit();

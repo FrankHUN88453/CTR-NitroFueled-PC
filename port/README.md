@@ -17,9 +17,12 @@ repository root for the shader tools.
 
 builds `build/CrashTeamRacingNitroFueled.exe` with the translated shaders (`../out/hlsl`, made by
 `tools/gcn2hlsl.py`) and the Xbox button glyphs embedded. `build_release.bat` builds the public release
-variant without them (`build-release/`); that one reads `shaders.bin` / `glyphs_xbox.rgba` from the
-game folder, made by `tools/setup_shaders.py` (`setup.bat` in the release zip,
-`tools/make_release.sh <version>` assembles the zip).
+variant without them (`build-release/`). Instead it carries the first-start setup (`res/setup.bin`:
+a minimal Python runtime packed from a python.org CPython install, `SETUP_PYTHON`, plus
+`tools/setup_shaders.py`; see `tools/pack_setup.py`): when `shaders.bin` is missing or of another
+version, `src/first_start.cpp` unpacks it to %TEMP%, runs it with a progress window and keeps
+`shaders.bin` / `glyphs_xbox.rgba` in `%LOCALAPPDATA%\CTRNF` (`CTR_USER_DIR` overrides).
+`tools/make_release.sh <version>` builds and zips the release (exe, README, LICENSE).
 
 ```bash
 build/CrashTeamRacingNitroFueled.exe "F:/PS4/CRTNF/UP0002-CUSA13795_00-CRASHTEAMRACING1"

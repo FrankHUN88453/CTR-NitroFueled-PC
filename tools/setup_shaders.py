@@ -1,12 +1,15 @@
 """One-time setup for a CrashTeamRacingNitroFueled.exe release: builds the files the exe needs from
-the player's own game dump, so that the release itself carries nothing of the game.
+the player's own game dump, so that the release itself carries nothing of the game. The release exe
+carries this script with a minimal Python runtime (tools/pack_setup.py) and runs it on the first
+start (port/src/first_start.cpp) with --out %LOCALAPPDATA%\\CTRNF.
 
   shaders.bin       the game's GCN shaders (archives/shaders_ps4.pak, plus a few that live in
                     eboot.bin) translated to D3D11 (gcn2hlsl.py) and packed (pack_shaders.py)
   glyphs_xbox.rgba  Xbox button glyphs, made from the Crash Bandicoot N. Sane Trilogy PC files when
                     they are installed (otherwise the game shows its PlayStation glyphs with a pad)
 
-Both go next to eboot.bin. Needs Python 3.8+ (standard library only) on Windows 10/11.
+Both go next to eboot.bin unless --out says otherwise. Needs Python 3.8+ (standard library only) on
+Windows 10/11.
 
 usage: python setup_shaders.py [game dir] [--nsane <N. Sane Trilogy dir>] [--out <dir>]
 """
@@ -128,14 +131,14 @@ def main(argv):
         igz_dir, shaders_dir, hlsl_dir = (os.path.join(work, d) for d in ("igz", "shaders", "hlsl"))
         for d in (igz_dir, shaders_dir, hlsl_dir):
             os.makedirs(d)
-        print("1/4 reading archives/shaders_ps4.pak ...")
+        print("1/4 reading archives/shaders_ps4.pak ...", flush=True)
         print(f"    {extract_shader_pak(pak, igz_dir)} shader files")
-        print("2/4 collecting the shaders ...")
+        print("2/4 collecting the shaders ...", flush=True)
         export_shaders.main(igz_dir, shaders_dir)
         print(f"    {add_runtime_shaders(game_dir, shaders_dir)} shaders from eboot.bin")
-        print("3/4 translating the shaders to D3D11 (takes a few minutes) ...")
+        print("3/4 translating the shaders to D3D11 (takes a few minutes) ...", flush=True)
         gcn2hlsl.main(shaders_dir, hlsl_dir)
-        print("4/4 packing ...")
+        print("4/4 packing ...", flush=True)
         pack_shaders.main(hlsl_dir, os.path.join(out_dir, "shaders.bin"))
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -155,7 +158,7 @@ def main(argv):
     else:
         print("Crash Bandicoot N. Sane Trilogy (PC) not found: no Xbox button glyphs, a controller shows the"
               " PlayStation ones (pass --nsane <folder> if it is installed elsewhere)")
-    print(f"Done in {time.time() - t0:.0f} s. Start CrashTeamRacingNitroFueled.exe from the game folder.")
+    print(f"Done in {time.time() - t0:.0f} s.", flush=True)
     return 0
 
 

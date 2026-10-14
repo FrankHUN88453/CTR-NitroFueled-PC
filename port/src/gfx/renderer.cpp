@@ -20,6 +20,7 @@
 #include "../hle/videoout.h"
 #include "../linker.h"
 #include "../config.h"
+#include "../first_start.h"
 #include "../hle/savedata.h"
 #include "../memory.h"
 #include "engine.h"
@@ -198,8 +199,10 @@ u64 Fnv(const u8* p, size_t n) {
 }
 
 // Translated shaders (tools/pack_shaders.py): embedded in the exe (RCDATA "SHADERS"), or - in a
-// release, which carries nothing of the game - shaders.bin in the game folder, made from the
-// player's own dump by tools/setup_shaders.py
+// release, which carries nothing of the game - shaders.bin made from the player's own dump by the
+// first-start setup (first_start.cpp) in %LOCALAPPDATA%\CTRNF (0.1 releases: the game folder).
+// A blob of another version than this exe's translator wants is made again.
+constexpr u32 kShaderBlobVersion = 1;
 std::unordered_map<std::string, std::pair<const u8*, u32>> g_embedded;
 std::vector<u8> g_shader_file;
 
@@ -209,12 +212,17 @@ const u8* ShaderBlob(u32* total) {
     const u8* p = g ? (const u8*)LockResource(g) : nullptr;
     *total = r ? SizeofResource(nullptr, r) : 0;
     if (p && *total >= 12 && memcmp(p, "CTRS", 4) == 0) return p;
-    if (g_shader_file.empty()) {
-        std::ifstream f(fs::path(g_linker.game_dir) / "shaders.bin", std::ios::binary);
+    auto usable = [](const std::vector<u8>& v) {
+        return v.size() >= 12 && memcmp(v.data(), "CTRS", 4) == 0 && R<u32>((u64)v.data() + 4) == kShaderBlobVersion;
+    };
+    for (const fs::path& dir : {ShaderCacheDir(), fs::path(g_linker.game_dir)}) {
+        if (usable(g_shader_file) || dir.empty()) break;
+        std::ifstream f(dir / "shaders.bin", std::ios::binary);
         g_shader_file.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
     }
+    if (!usable(g_shader_file)) g_shader_file.clear();
     *total = (u32)g_shader_file.size();
-    return *total >= 12 && memcmp(g_shader_file.data(), "CTRS", 4) == 0 ? g_shader_file.data() : nullptr;
+    return g_shader_file.empty() ? nullptr : g_shader_file.data();
 }
 
 std::string LoadEmbeddedShaders() {

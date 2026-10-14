@@ -1530,6 +1530,9 @@ def main(src_dir, out_dir, filt=None):
     with mp.Pool() as pool:
         for name, status, reason, lines in pool.imap_unordered(work, jobs, chunksize=8):
             stats[status] += 1
+            n = sum(stats.values())
+            if n % 50 == 0 or n == len(jobs):
+                print(f"translated {n}/{len(jobs)}", flush=True)
             if status == "compiled":
                 results[name] = {"ok": True}
                 rt_index += lines

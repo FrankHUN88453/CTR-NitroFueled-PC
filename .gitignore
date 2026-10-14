@@ -16,4 +16,5 @@ port/res/glyphs_xbox.rgba
 port/res/glyphs_xbox_preview.png
 port/build-release/
 port/dist/
+port/res/setup.bin
 out/

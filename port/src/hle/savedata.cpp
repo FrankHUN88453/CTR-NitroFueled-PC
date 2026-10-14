@@ -127,7 +127,7 @@ Param ReadParam(const fs::path& dir) {
         auto t = fs::last_write_time(dir, ec);
         if (!ec)
             p.mtime = std::chrono::duration_cast<std::chrono::seconds>(
-                          std::chrono::clock_cast<std::chrono::system_clock>(t).time_since_epoch())
+                          (t - fs::file_time_type::clock::now() + std::chrono::system_clock::now()).time_since_epoch())
                           .count();
     }
     return p;

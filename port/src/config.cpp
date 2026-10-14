@@ -95,6 +95,17 @@ void MigrateWindowDataText(const fs::path& dir) {
     LOG("settings: moved the window settings from %s into %s", old.string().c_str(), g_path.c_str());
 }
 
+#ifndef _WIN32
+// Steam Deck (LCD: Jupiter, OLED: Galileo): its APU cannot render the PC defaults (4K
+// supersampling of the PS4 Pro picture), so a fresh settings file starts with what it can
+bool IsSteamDeck() {
+    std::ifstream f("/sys/devices/virtual/dmi/id/product_name");
+    std::string name;
+    std::getline(f, name);
+    return name == "Jupiter" || name == "Galileo";
+}
+#endif
+
 }  // namespace
 
 void ConfigInit() {
@@ -128,6 +139,14 @@ void ConfigInit() {
             fputs(kDefaults, out);
             fclose(out);
         }
+#ifndef _WIN32
+        if (IsSteamDeck()) {
+            WritePrivateProfileStringA("Graphics", "RenderScale", "67", g_path.c_str());  // 720p
+            WritePrivateProfileStringA("Graphics", "PS4Pro", "0", g_path.c_str());
+            WritePrivateProfileStringA("Display", "Fullscreen", "1", g_path.c_str());
+            LOG("settings: Steam Deck defaults (720p internal, base PS4 mode, fullscreen)");
+        }
+#endif
     }
     MigrateWindowDataText(dir);
     // settings added later: show them in files written by earlier builds

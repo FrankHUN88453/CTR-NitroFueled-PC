@@ -4,6 +4,14 @@
 #ifdef _WIN32
 #include <d3dcompiler.h>
 #endif
+#ifndef D3D11_FILTER_REDUCTION_TYPE_MASK  // older d3d11.h (DXVK native's MinGW headers)
+typedef enum D3D11_FILTER_REDUCTION_TYPE {
+    D3D11_FILTER_REDUCTION_TYPE_STANDARD = 0,
+    D3D11_FILTER_REDUCTION_TYPE_COMPARISON = 1,
+    D3D11_FILTER_REDUCTION_TYPE_MINIMUM = 2,
+    D3D11_FILTER_REDUCTION_TYPE_MAXIMUM = 3,
+} D3D11_FILTER_REDUCTION_TYPE;
+#endif
 #include <wrl/client.h>
 
 #include <algorithm>

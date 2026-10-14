@@ -147,7 +147,11 @@ void DumpTexture(const TSharp& t, const Layout& l, const std::vector<D3D11_SUBRE
     std::filesystem::create_directories(dir, ec);
     char name[64];
     snprintf(name, sizeof(name), "%llx_%ux%u.bmp", (unsigned long long)t.base, t.width, t.height);
+#ifdef _WIN32
     FILE* f = _wfopen((dir / name).c_str(), L"wb");
+#else
+    FILE* f = fopen((dir / name).c_str(), "wb");
+#endif
     if (!f) return;
     u32 w = l.mips[0].ew, h = l.mips[0].eh, size = w * h * 4;
     u8 hdr[54] = {'B', 'M'};

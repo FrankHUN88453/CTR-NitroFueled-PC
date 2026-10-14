@@ -120,6 +120,7 @@ typedef struct _CONTEXT {
 #define VK_INSERT 0x2D
 #define VK_DELETE 0x2E
 #define VK_NUMPAD0 0x60
+#define VK_NUMPAD9 0x69
 #define VK_MULTIPLY 0x6A
 #define VK_ADD 0x6B
 #define VK_SUBTRACT 0x6D
@@ -128,6 +129,7 @@ typedef struct _CONTEXT {
 #define VK_F1 0x70
 #define VK_F11 0x7A
 #define VK_F12 0x7B
+#define VK_F24 0x87
 #define VK_LSHIFT 0xA0
 #define VK_RSHIFT 0xA1
 #define VK_LCONTROL 0xA2

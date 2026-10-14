@@ -4,6 +4,7 @@
 
 #include <unknwn.h>
 
+#include <memory>
 #include <utility>
 
 namespace Microsoft::WRL {
@@ -28,7 +29,7 @@ public:
         return *this;
     }
     ComPtr& operator=(ComPtr&& o) noexcept {
-        if (this != &o) {
+        if (this != std::addressof(o)) {
             Reset();
             p_ = o.p_;
             o.p_ = nullptr;

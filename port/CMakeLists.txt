@@ -32,6 +32,7 @@ add_executable(${APP}
     src/mouse_ui.cpp
     src/settings_menu.cpp
     src/first_start.cpp
+    src/selftest.cpp
     src/hle/kernel_misc.cpp
     src/hle/kernel_thread.cpp
     src/hle/kernel_file.cpp

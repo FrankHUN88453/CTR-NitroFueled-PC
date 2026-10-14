@@ -6,6 +6,7 @@
 #include <clocale>
 #include <cstdlib>
 #include <filesystem>
+#include <string>
 
 #include "common.h"
 #include "linker.h"
@@ -17,6 +18,7 @@
 #include "mouse_ui.h"
 
 void InstallCrashHandler();
+int RunSelfTest();  // selftest.cpp
 
 namespace {
 
@@ -73,6 +75,7 @@ DWORD WINAPI MainThread(LPVOID) {
 
 int main(int argc, char** argv) {
     namespace fs = std::filesystem;
+    if (argc > 1 && std::string(argv[1]) == "--selftest") return RunSelfTest();
 #ifndef _WIN32
     setlocale(LC_ALL, "");                  // UTF-8 file names
     setenv("DXVK_WSI_DRIVER", "SDL2", 0);  // DXVK native: HWND = SDL_Window*

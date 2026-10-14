@@ -52,6 +52,9 @@ jobs:
             -DDXVK_INCLUDE_WINDOWS="$DXVK_WIN" -DDXVK_INCLUDE_DIRECTX="$DXVK_DX" -DDXVK_LIB_DIR="$DXVK_LIB"
           cmake --build build -- -k 0
 
+      - name: Self test (platform layer, no game)
+        run: build/CrashTeamRacingNitroFueled --selftest
+
       - name: AppImage
         run: sh port/tools/make_appimage.sh build/CrashTeamRacingNitroFueled "$DXVK_LIB" vkd3d-out out "${GITHUB_REF_NAME}"
 
